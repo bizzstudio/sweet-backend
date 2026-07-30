@@ -1,0 +1,30 @@
+# תלויות — מותקנות בתוך התמונה
+node_modules
+.pnp
+.pnp.js
+
+# קבצי סביבה וסודות — מוזרקים בזמן ריצה דרך env_file, לא נצרבים לתמונה
+.env
+.env.*
+
+# git ו-CI
+.git
+.gitignore
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# בדיקות וכיסוי
+coverage
+
+# לוגים
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# קבצי עורך / מערכת הפעלה
+.vscode
+.idea
+.DS_Store
