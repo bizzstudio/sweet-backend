@@ -8,15 +8,16 @@
 
 # production
 /build
+
+# ---- קבצי סביבה ----
+# חוסמים כל וריאציה (.env.local, .env.backup-... וכו') כדי שגיבוי או קובץ
+# זמני עם סודות לא ייכנס ל-git בטעות. רק התבנית .env.example נכנסת.
 .env
-.env.local
+.env.*
+!.env.example
 
 # misc
 .DS_Store
-.env.development.local
-.env.test.local
-.env.production.local
-.env
 # google service account key
 utils/upload-images-435010-b13a3e3ba095.json
 *-service-account*.json

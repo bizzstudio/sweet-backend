@@ -25,6 +25,7 @@ const deliveryRoutes = require('../routes/deliveryRoutes');
 const popupRoutes = require('../routes/popupRoutes');
 const messageRoutes = require('../routes/messageRoutes');
 const cashierOrderRoutes = require("../routes/cashierOrderRoutes");
+const incomingOrderRoutes = require("../routes/incomingOrderRoutes");
 const blogRoutes = require("../routes/blogRoutes");
 const lotteryRoutes = require("../routes/lotteryRoutes");
 const { getActiveLottery } = require("../controller/lotteryController");
@@ -54,7 +55,21 @@ app.use((err, req, res, next) => {
 // app.enable('trust proxy');
 app.set("trust proxy", 1);
 
-app.use(express.json({ limit: "4mb" }));
+// ‏webhook הווצאפ מקבל קבצים מצורפים כ-base64, וקובץ של 5MB תופס כ-6.7MB
+// בקידוד הזה — מעל התקרה הכללית. הוא מדלג כאן ומפרסר את הגוף בעצמו, עם תקרה
+// גדולה יותר ורק אחרי אימות ה-API key, כדי שהתקרה הרחבה לא תחול על כל השרת.
+//
+// הביטוי סלחני בכוונה: ניתוב ב-express אינו תלוי רישיות ומתעלם מלוכסן בסוף,
+// ולכן גם הדילוג חייב להתנהג כך. השוואת מחרוזת פשוטה הייתה מחמיצה
+// "/API/Incoming-Orders/WhatsApp/" — הבקשה הייתה מגיעה לנתיב הנכון, אבל עם
+// תקרת 4MB, כלומר קובץ גדול היה נדחה ב-413 בלי הסבר.
+const WHATSAPP_WEBHOOK_PATH = /^\/api\/incoming-orders\/whatsapp\/?$/i;
+const jsonParser = express.json({ limit: "4mb" });
+
+app.use((req, res, next) => {
+  if (WHATSAPP_WEBHOOK_PATH.test(req.path)) return next();
+  return jsonParser(req, res, next);
+});
 app.use(helmet());
 app.use(cors());
 
@@ -113,6 +128,9 @@ app.get("/api/lottery/active", getActiveLottery);
 app.use("/api/admin/lotteries", isAdmin, lotteryRoutes);
 app.use("/api/admin/", isAdmin, adminRoutes);
 app.use("/api/orders/", orderRoutes);
+// קליטת הזמנות מהמייל ומווצאפ. האימות מוגדר per-route (webhook מול אדמין),
+// ולכן אין כאן מידלוור גלובלי.
+app.use("/api/incoming-orders/", incomingOrderRoutes);
 app.use("/api/status/", isAdmin, statusRoutes);
 
 // Sync the app with the orders

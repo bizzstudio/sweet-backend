@@ -4,7 +4,10 @@ const Order = require("../models/Order");
 const Status = require("../models/Status");
 
 (async () => {
-  await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(
+    process.env.MONGO_URI,
+    process.env.MONGO_DB_NAME ? { dbName: process.env.MONGO_DB_NAME } : {}
+  );
   const id = "6a32527049178b09df3e940f";
   const o = await Order.findById(id).lean();
   if (!o) {

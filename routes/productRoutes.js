@@ -3,11 +3,13 @@ const express = require("express");
 const router = express.Router();
 const {
   addProduct,
-  addAllProducts,
+  importProducts,
+  checkImportProducts,
   getAllProducts,
   getShowingProducts,
   getCartProducts,
   getProductById,
+  getProductDetails,
   getProductBySlug,
   updateProduct,
   updateProductPrice,
@@ -24,8 +26,11 @@ const { isAdmin, extractUserDetails } = require("../config/auth");
 // add a product
 router.post("/add", isAdmin, addProduct);
 
-// add multiple products
-router.post("/all", isAdmin, addAllProducts);
+// בדיקה מקדימה לפני יבוא אקסל (מה קיים, אילו קטגוריות חסרות)
+router.post("/import/check", isAdmin, checkImportProducts);
+
+// יבוא/עדכון מוצרים מאקסל לפי מק"ט - חייב להיות לפני "/:id"
+router.post("/import", isAdmin, importProducts);
 
 // get a product
 router.post("/:id", getProductById);
@@ -47,6 +52,10 @@ router.get("/store", getShowingStoreProducts);
 
 // get all products
 router.get("/", getAllProducts);
+
+// כרטיס מוצר מלא (כולל נתוני ההנהח"ש מיבוא האקסל) למסך "צפייה במוצר".
+// לא מתנגש עם "/product/:slug": שם הסגמנט השני הוא ה-slug, וכאן הוא "details"
+router.get("/:id/details", isAdmin, getProductDetails);
 
 // get a product by slug
 router.get("/product/:slug", getProductBySlug);

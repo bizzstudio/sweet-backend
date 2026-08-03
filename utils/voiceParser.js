@@ -151,6 +151,13 @@ function generateHebrewVariations(word) {
         { from: /$/, to: 'ה' },        // "לבן" → "לבנה"  
         { from: /ה$/, to: '' },        // "לבנה" → "לבן"
 
+        // נסמך נקבה יחיד ↔ נפרד. נפוץ מאוד בשמות מוצרים:
+        // "חליטת לימונית" מול "חליטה", "עוגת גבינה" מול "עוגה", "יחידת" מול "יחידה".
+        // ה-specialCases למעלה כבר טיפל בכמה מהמקרים ידנית (סלסילה/סלסילת),
+        // וזה הכלל הכללי שמייתר את הרישום הידני.
+        { from: /ת$/, to: 'ה' },       // "חליטת" → "חליטה"
+        { from: /ה$/, to: 'ת' },       // "חליטה" → "חליטת"
+
         // דפוסים נוספים
         { from: /ן$/, to: 'נה' },      // "קטן" → "קטנה"
         { from: /נה$/, to: 'ן' },      // "קטנה" → "קטן"
@@ -175,7 +182,20 @@ function generateHebrewVariations(word) {
         });
     });
 
-    return Array.from(variations).filter(v => v.length > 2);
+    // הסינון על אורך > 2 מסלק ווריאציות רועשות שנוצרו מהדפוסים (למשל "ת"
+    // מ-"תה"), אבל הוא סילק גם את המילה המקורית עצמה כשהיא בת שתי אותיות.
+    // התוצאה הייתה שמילים נפוצות כמו "תה", "עם", "הל", "דל" קיבלו רשימת
+    // ווריאציות שאינה מכילה אותן — ולכן תנאי "כל המילים מופיעות בכותרת"
+    // (ה-$and ב-buildProductSearchConditions) לא היה יכול להתקיים לעולם
+    // עבור שאילתה שכוללת מילה כזו. "תה ירוק לימונית" לא היה נמצא.
+    //
+    // לכן: מסננים לפי אורך, אבל תמיד מחזירים גם את המילה המקורית ואת צורתה
+    // המנורמלת. זו הרחבה בלבד — היא מוסיפה התאמות ולא מסירה.
+    const filtered = Array.from(variations).filter(v => v.length > 2);
+    const original = word.toLowerCase();
+    const originalNormalized = normalizeFinalLetters(original);
+
+    return Array.from(new Set([original, originalNormalized, ...filtered]));
 };
 
 // פונקציה לנירמול מילה עברית כדי להשוות טוב יותר
@@ -193,6 +213,14 @@ function removeApostrophes(text) {
         .replace(/ʻ/g, ''); // הסרת גרש יוניקוד נוסף
 };
 
+// בריחה מתווים בעלי משמעות ב-regex.
+//
+// בלי זה שם מוצר שמכיל סוגריים — "גבינה לבנה 5% אישית (100 גרם)" — נבנה
+// לתבנית עם קבוצת לכידה במקום סוגריים ממשיים, ושם עם סוגר לא מאוזן זורק
+// "Invalid regular expression: Unmatched ')'" ומפיל את ההתאמה של אותו פריט.
+// שני המקרים נצפו בהזמנות אמיתיות שנקלטו מהמייל.
+const escapeRegexChar = (char) => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // פונקציה ליצירת regex שמתעלם מגרשים
 function createApostropheIgnoringRegex(word) {
     // הסרת גרשים מהמילה המקורית
@@ -201,6 +229,7 @@ function createApostropheIgnoringRegex(word) {
     // יצירת regex שמאפשר גרש אופציונלי בין כל תו
     const regexPattern = cleanWord
         .split('')
+        .map(escapeRegexChar)
         .join('[\'\'`ʼʻ]?'); // גרש אופציונלי בין כל תו
 
     return new RegExp(regexPattern, 'i');

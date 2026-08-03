@@ -44,6 +44,37 @@ const CitySchema = new mongoose.Schema({
   }
 }, { _id: false, strict: false }); // Allows additional fields
 
+// נתוני ההנהלת חשבונות מיבוא האקסל ("רשימת לקוחות"). מוחזק בנפרד כדי שהיבוא
+// לא ידרוך על פרטי הלקוח בחנות, ושומר גם את הערכים הגולמיים מהקובץ
+const CustomerErpSchema = new mongoose.Schema(
+  {
+    customerNumber: { type: String, required: false },
+    contactPerson: { type: String, required: false },
+    notes: { type: String, required: false },
+    idNumber: { type: String, required: false },
+    active: { type: Boolean, required: false },
+    points: { type: Number, required: false },
+    discountPercent: { type: Number, required: false },
+    cumulativePurchase: { type: Number, required: false },
+    credit: { type: Number, required: false },
+    openingBalance: { type: Number, required: false },
+    agent: { type: String, required: false },
+    customerType: { type: String, required: false },
+    priceLevel: { type: Number, required: false },
+    paymentTerms: { type: Number, required: false },
+    rawEmail: { type: String, required: false },
+    rawAddress: { type: String, required: false },
+    rawCity: { type: String, required: false },
+    mobile: { type: String, required: false },
+    landline: { type: String, required: false },
+    birthDate: { type: Date, required: false },
+    openDate: { type: Date, required: false },
+    lastPurchaseAt: { type: Date, required: false },
+    syncedAt: { type: Date, required: false },
+  },
+  { _id: false }
+);
+
 const customerSchema = new mongoose.Schema(
   {
     name: {
@@ -143,6 +174,14 @@ const customerSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
+    // נתוני ההנהח"ש מיבוא האקסל. select: false כדי שיתרות והערות פנימיות
+    // לא ייצאו בתגובות רגילות - היבוא מבקש אותם במפורש.
+    erp: {
+      type: CustomerErpSchema,
+      required: false,
+      select: false,
+    },
   },
   {
     timestamps: true,
@@ -151,6 +190,13 @@ const customerSchema = new mongoose.Schema(
 
 // אינדקס קטן אם תרצה לבדוק מהר האם לקוח ניצל Offer מסוים
 customerSchema.index({ _id: 1, redeemedOffers: 1 });
+
+// התאמת לקוח מיבוא האקסל נעשית לפי מספר הלקוח בהנהח"ש
+customerSchema.index({ "erp.customerNumber": 1 });
+
+// חיפוש לפי טלפון קורה בכניסה ב-SMS, בזיהוי כפילויות בהרשמה וביבוא האקסל
+// (שם נבנית שאילתת $in גדולה). בלי אינדקס כל אחד מהם סורק את כל האוסף.
+customerSchema.index({ phone: 1 });
 
 const Customer = mongoose.model("Customer", customerSchema);
 

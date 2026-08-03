@@ -1,6 +1,12 @@
 // controller/categoryController.js
 const mongoose = require('mongoose');
 const Category = require("../models/Category");
+const {
+  resolveRootCategory,
+  findRootCategory,
+  toParentId,
+  ROOT_SLUG,
+} = require("../utils/rootCategory");
 
 const addCategory = async (req, res) => {
   try {
@@ -11,7 +17,25 @@ const addCategory = async (req, res) => {
     if (slugExists) {
       return res.status(400).send({ message: "slug already exists" });
     }
-    const newCategory = new Category(req.body);
+
+    const categoryData = { ...req.body };
+
+    // הטופס באדמין שולח parentId ריק כשלא נבחר הורה. קטגוריה כזו נשמרת
+    // כשורש נוסף ואז דף הקטגוריות (שמציג רק את data[0].children) מציג את
+    // הילדים שלה - כלומר כלום. לכן היא נתלית אוטומטית תחת השורש
+    if (!toParentId(categoryData.parentId)) {
+      const all = await Category.find({}).select("name slug parentId").lean();
+
+      // החריג היחיד: אין עדיין שורש והמשתמש יוצר אותו בעצמו (slug "home").
+      // בכל מקרה אחר הקטגוריה נתלית תחת השורש, שנוצר אם הוא חסר
+      if (findRootCategory(all) || categoryData.slug !== ROOT_SLUG) {
+        const root = await resolveRootCategory(all);
+        categoryData.parentId = String(root._id);
+        categoryData.parentName = root.name;
+      }
+    }
+
+    const newCategory = new Category(categoryData);
     await newCategory.save();
     res.status(200).send({
       message: "Category Added Successfully!",

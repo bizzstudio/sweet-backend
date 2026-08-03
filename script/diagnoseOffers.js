@@ -5,7 +5,10 @@ const mongoose = require("mongoose");
 const Offer = require("../models/Offer");
 
 (async () => {
-  await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(
+    process.env.MONGO_URI,
+    process.env.MONGO_DB_NAME ? { dbName: process.env.MONGO_DB_NAME } : {}
+  );
 
   const now = new Date();
   console.log("=== זמן המכונה ===");

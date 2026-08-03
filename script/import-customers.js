@@ -152,8 +152,11 @@ async function importCustomers() {
         process.exit(1);
     }
 
-    await mongoose.connect(uri);
-    console.log('[import] Connected to MongoDB');
+    await mongoose.connect(
+        uri,
+        process.env.MONGO_DB_NAME ? { dbName: process.env.MONGO_DB_NAME } : {}
+    );
+    console.log(`[import] Connected to MongoDB (db: ${mongoose.connection.name})`);
 
     const rows = readXlsxRows(XLSX_PATH);
     if (!rows.length) {

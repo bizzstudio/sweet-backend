@@ -3,7 +3,7 @@ const customerRegisterBody = (option) => { return `
   xmlns:o="urn:schemas-microsoft-com:office:office" dir="rtl">
 
 <head>
-  <title>תמרים בתומר</title>
+  <title>המתוקים של בני</title>
   <!--[if !mso]><!-->
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <!--<![endif]-->
@@ -115,7 +115,7 @@ const customerRegisterBody = (option) => { return `
                                     <tr>
                                       <td style="width:150px;">
                                         <!-- replace image cdn -->
-                                        <img alt height="auto" src="https://i.imgur.com/5zixCOQ.png"
+                                        <img alt height="auto" src="${process.env.STORE_URL}/logo/logo-full.png"
                                           style="border:0;display:block;outline:none;text-decoration:none;height:auto;width:140px;font-size:13px;padding-bottom:30px;"
                                           width="140" height="140" />
                                       </td>
@@ -181,7 +181,7 @@ const customerRegisterBody = (option) => { return `
 
                           <h2 style="margin-bottom:10px;">שלום ${option.name}${option.lastname ? " " + option.lastname :
                             ''}</h2>
-                          <p>אנא אמת את כתובת האימייל שלך כדי להשלים את ההרשמה ולהתחבר לחשבון המשתמש שלך בתמרים בתומר.
+                          <p>אנא אמת את כתובת האימייל שלך כדי להשלים את ההרשמה ולהתחבר לחשבון המשתמש שלך בהמתוקים של בני.
                           </p>
                           <p style="margin-bottom:30px;">הלינק יפוג בעוד <strong>15 דקות</strong>.</p>
 
@@ -192,7 +192,7 @@ const customerRegisterBody = (option) => { return `
                           <p style="margin-top: 35px;">אם לא ביצעת את הבקשה הזו, אנא פנה אלינו מיד ל-
                             ${process.env.EMAIL_USER}</p>
 
-                          <p style="margin-top: 40px; text-align:center;">בברכה,<br /><strong>צוות תמרים בתומר</strong>
+                          <p style="margin-top: 40px; text-align:center;">בברכה,<br /><strong>צוות המתוקים של בני</strong>
                           </p>
 
                           <!--end email_template -->
@@ -294,11 +294,11 @@ const customerRegisterBody = (option) => { return `
                                                               style="font-size:0px;padding:0px 20px;word-break:break-word;">
                                                               <div
                                                                 style="padding-top:10px; font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:11px;font-weight:400;line-height:16px;text-align:center;color:#8a8a8a;">
-                                                                אתה מקבל אימייל זה מפני שנרשמת לתמרים בתומר והסכמת לקבל
+                                                                אתה מקבל אימייל זה מפני שנרשמת להמתוקים של בני והסכמת לקבל
                                                                 דואר אלקטרוני מאיתנו.
                                                                 <p
                                                                   style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif;font-size:11px;font-weight:400;line-height:16px;text-align:center;color:#303030;">
-                                                                  &copy; תמרים בתומר, כל הזכויות שמורות.</p>
+                                                                  &copy; המתוקים של בני, כל הזכויות שמורות.</p>
                                                               </div>
                                                             </td>
                                                           </tr>

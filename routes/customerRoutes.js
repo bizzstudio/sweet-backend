@@ -14,10 +14,12 @@ const {
   resetPassword,
   getAllCustomers,
   getCustomerById,
+  getCustomerDetails,
   getShippingRewardEligibility,
   updateCustomer,
   deleteCustomer,
-  addAllCustomers,
+  importCustomers,
+  checkImportCustomers,
   addToBlackListByPhone,
   toggleCustomerCashier,
   validateToken,
@@ -96,8 +98,11 @@ router.put("/reset-password", resetPassword);
 // change password
 router.post("/change-password", isAuth, changePassword);
 
-// add all users
-router.post("/add/all", isAdmin, addAllCustomers);
+// בדיקה מקדימה לפני יבוא אקסל של לקוחות
+router.post("/import/check", isAdmin, checkImportCustomers);
+
+// יבוא/עדכון לקוחות מאקסל לפי מספר לקוח
+router.post("/import", isAdmin, importCustomers);
 
 // get all user
 router.get("/", isAdmin, getAllCustomers);
@@ -106,6 +111,9 @@ router.get("/", isAdmin, getAllCustomers);
 // זכאות הלקוח המחובר לקופון "לקנייה הבאה".
 // חייב להירשם *לפני* "/:id" — אחרת הנתיב הזה נבלע על ידו ונחסם ב-isAdmin.
 router.get("/shipping-reward-eligible", isAuth, getShippingRewardEligibility);
+
+// כרטיס לקוח מלא (כולל נתוני ההנהח"ש מיבוא האקסל) למסך "צפייה בלקוח"
+router.get("/:id/details", isAdmin, getCustomerDetails);
 
 router.get("/:id", isAdmin, getCustomerById);
 

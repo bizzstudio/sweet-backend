@@ -5,7 +5,14 @@ const Category = require("../models/Category");
 const { languageCodes } = require("../utils/data");
 const { getAllOffers } = require("./offerController");
 const Offer = require("../models/Offer");
-const { parseText, generateHebrewVariations, createApostropheIgnoringRegex } = require("../utils/voiceParser");
+const { parseText } = require("../utils/voiceParser");
+const { resolveRootCategory } = require("../utils/rootCategory");
+// מנוע הדירוג ובניית תנאי החיפוש חולצו ל-utils/productMatching.js כדי שהחיפוש
+// הקולי וקליטת ההזמנות מהמייל/ווצאפ ישתמשו באותה לוגיקה בדיוק.
+const {
+  rankProductsByRelevance,
+  buildProductSearchConditions,
+} = require("../utils/productMatching");
 const { notifyLowStock, getLowStockThreshold } = require("../lib/stock-controller/others");
 
 // בריחה מתווים מיוחדים של regex כדי שקלט משתמש לא ישבור את השאילתה
@@ -40,19 +47,551 @@ const addProduct = async (req, res) => {
   }
 };
 
-const addAllProducts = async (req, res) => {
+/* ------------------------------------------------------------------ *
+ * יבוא מוצרים מקובץ אקסל של ההנהח"ש ("רשימת המוצרים - כל הספקים")
+ * העמודות מפוענחות בצד האדמין ונשלחות לכאן כשורות מנורמלות.
+ * העדכון הוא לפי מק"ט (sku): מוצר קיים מתעדכן, חדש נוצר. אין מחיקות.
+ * ------------------------------------------------------------------ */
+
+const IMPORT_MAX_ROWS = 2000;
+// מגבלה על גודל הבדיקה המקדימה כדי שלא תיבנה שאילתת $in ענקית
+const CHECK_MAX_VALUES = 20000;
+
+// prices.price בחנות הוא המחיר הסופי שהלקוח משלם - הוא נשלח כמות שהוא
+// כ-UnitCost לחשבונית עם דגל IsVatFree, ואין בשום מקום בפרויקט חישוב מע"מ
+// על גביו. לכן רק עמודות "כולל מע"מ" יכולות לשמש כמקור מחיר: עמודה ללא
+// מע"מ הייתה מתמחרת את כל הקטלוג בחסר בשיעור המע"מ, בלי שאיש ישים לב.
+const IMPORT_PRICE_FIELDS = {
+  consumerIncVat: "priceIncVat",
+  storeIncVat: "storePriceIncVat",
+};
+const IMPORT_DEFAULT_PRICE_FIELD = "priceIncVat";
+
+// סדר ה-fallback כשהעמודה שנבחרה ריקה/0 - גם כאן רק מחירים כולל מע"מ
+const IMPORT_PRICE_FALLBACK = ["priceIncVat", "storePriceIncVat"];
+
+const toImportNumber = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  // ערך שכבר הגיע כמספר עובר כמו שהוא. ניקוי התווים למטה נועד למחרוזות
+  // עם סימני מטבע ופסיקים, אבל הוא הורס סימון מדעי שאקסל מייצר לערכים
+  // קטנים או גדולים מאוד: 7.1e-15 הפך ל-null ו-1e21 הפך ל-121 בשקט
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const raw = String(value).trim();
+  // מחרוזת שכולה מספר תקין (כולל סימון מדעי) נקראת ישירות
+  const direct = Number(raw);
+  if (raw !== "" && Number.isFinite(direct)) return direct;
+  // ניקוי סימני מטבע/אחוז/פסיקים. בלי בדיקת הספרה, ערך שאין בו מספר כלל
+  // ("abc", "-", רווחים) היה מנוקה למחרוזת ריקה, ו-Number("") מחזיר 0 - כלומר
+  // זבל נשמר כאפס במקום להיחשב ריק, ובניגוד לפענוח בצד האדמין שמחזיר null
+  const cleaned = raw.replace(/[^\d.,-]/g, "").replace(/,/g, "");
+  if (!/\d/.test(cleaned)) return null;
+  const num = Number(cleaned);
+  return Number.isFinite(num) ? num : null;
+};
+
+const toImportString = (value) => {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+};
+
+// נרמול שם לצורך התאמת קטגוריה קיימת (מסיר גרשיים ורווחים כפולים)
+const normalizeImportName = (value) =>
+  toImportString(value)
+    .toLowerCase()
+    .replace(/["'`״׳]/g, "")
+    .replace(/\s+/g, " ");
+
+const buildImportSlug = (value) =>
+  toImportString(value)
+    .toLowerCase()
+    .replace(/[()"'`״׳]/g, "")
+    .replace(/[\\/]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+
+const resolveImportPrice = (row, options) => {
+  const primaryKey =
+    IMPORT_PRICE_FIELDS[options.priceSource] || IMPORT_DEFAULT_PRICE_FIELD;
+  const primary = toImportNumber(row[primaryKey]);
+  if (primary > 0) return primary;
+
+  if (options.priceFallback) {
+    for (const key of IMPORT_PRICE_FALLBACK) {
+      const value = toImportNumber(row[key]);
+      if (value > 0) return value;
+    }
+  }
+  return 0;
+};
+
+const buildErpPayload = (row) => ({
+  barcode: toImportString(row.barcode),
+  barcode2: toImportString(row.barcode2),
+  externalSku: toImportString(row.externalSku),
+  supplierSku: toImportString(row.supplierSku),
+  unit: toImportString(row.unit),
+  supplierName: toImportString(row.supplierName),
+  supplierNumber: toImportNumber(row.supplierNumber),
+  groupName: toImportString(row.groupName),
+  groupCode: toImportNumber(row.groupCode),
+  departmentCode: toImportNumber(row.departmentCode),
+  cost: toImportNumber(row.cost),
+  currency: toImportString(row.currency),
+  notes: toImportString(row.notes),
+  syncedAt: new Date(),
+});
+
+// עם ordered:false מונגוס משמיט שורות שנכשלו בולידציה ומצרף אותן לתוצאה.
+// בלי לקרוא אותן היבוא היה מדווח שנוצרו יותר שורות ממה שנכתב בפועל.
+const collectValidationErrors = (result, report) => {
+  const validationErrors = result?.mongoose?.validationErrors || [];
+  validationErrors.forEach((validationError) => {
+    report.created = Math.max(0, report.created - 1);
+    report.skipped += 1;
+    if (report.errors.length < 50) {
+      report.errors.push({
+        rowNumber: null,
+        sku: "",
+        name: "",
+        message: validationError?.message || "השורה לא עברה ולידציה",
+      });
+    }
+  });
+};
+
+// מק"ט מהאקסל הוא מספר, ובמסד יכולים להיות מק"טים שנשמרו כמספר וכמחרוזת.
+// חיפוש בשתי הצורות מונע יצירת מוצר כפול למק"ט שכבר קיים.
+const importSkuQuery = (skus) => {
+  const numeric = skus.map(Number).filter((num) => Number.isFinite(num));
+  return numeric.length > 0
+    ? { $or: [{ sku: { $in: skus } }, { sku: { $in: numeric } }] }
+    : { sku: { $in: skus } };
+};
+
+// בדיקה מקדימה לפני היבוא: מה קיים במערכת ואילו קטגוריות חסרות
+const checkImportProducts = async (req, res) => {
   try {
-    // console.log('product data',req.body)
-    await Product.deleteMany();
-    await Product.insertMany(req.body);
-    res.status(200).send({
-      message: "Product Added successfully!",
+    const skus = (Array.isArray(req.body?.skus) ? req.body.skus : [])
+      .map((sku) => toImportString(sku))
+      .filter(Boolean);
+    const groups = (Array.isArray(req.body?.groups) ? req.body.groups : [])
+      .map((group) => toImportString(group))
+      .filter(Boolean);
+
+    if (skus.length > CHECK_MAX_VALUES || groups.length > CHECK_MAX_VALUES) {
+      return res
+        .status(400)
+        .send({ message: `ניתן לבדוק עד ${CHECK_MAX_VALUES} רשומות בכל בקשה` });
+    }
+
+    const existingSkus = [];
+    const chunkSize = 1000;
+    for (let i = 0; i < skus.length; i += chunkSize) {
+      const found = await Product.find(importSkuQuery(skus.slice(i, i + chunkSize)))
+        .select("sku")
+        .lean();
+      found.forEach((product) => existingSkus.push(toImportString(product.sku)));
+    }
+
+    const categories = await Category.find({}).select("name").lean();
+    const knownNames = new Set();
+    categories.forEach((category) => {
+      Object.values(category?.name || {}).forEach((value) => {
+        if (typeof value === "string" && value.trim()) {
+          knownNames.add(normalizeImportName(value));
+        }
+      });
+    });
+
+    const missingGroups = [
+      ...new Set(groups.filter((group) => !knownNames.has(normalizeImportName(group)))),
+    ];
+
+    res.send({
+      existingSkus,
+      existingCount: existingSkus.length,
+      newCount: skus.length - existingSkus.length,
+      missingGroups,
+      totalCategories: categories.length,
     });
   } catch (err) {
-    console.log('addAllProducts error: ', err);
-    res.status(500).send({
-      message: err.message,
+    console.log("checkImportProducts error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
+const importProducts = async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    const rawOptions = req.body?.options || {};
+
+    if (rows.length === 0) {
+      return res.status(400).send({ message: "לא נשלחו שורות לייבוא" });
+    }
+    if (rows.length > IMPORT_MAX_ROWS) {
+      return res
+        .status(400)
+        .send({ message: `ניתן לשלוח עד ${IMPORT_MAX_ROWS} שורות בכל בקשה` });
+    }
+
+    const options = {
+      createNew: rawOptions.createNew !== false,
+      updateExisting: rawOptions.updateExisting !== false,
+      updateName: !!rawOptions.updateName,
+      updateCategory: !!rawOptions.updateCategory,
+      updatePrices: !!rawOptions.updatePrices,
+      updateStock: !!rawOptions.updateStock,
+      updateStatus: !!rawOptions.updateStatus,
+      zeroNegativeStock: rawOptions.zeroNegativeStock !== false,
+      createCategories: rawOptions.createCategories !== false,
+      priceFallback: rawOptions.priceFallback !== false,
+      priceSource: rawOptions.priceSource || "consumerIncVat",
+      // מוצר חדש נכנס מוסתר כברירת מחדל - עד שיוגדרו לו מחיר ותמונה
+      newProductStatus: ["show", "hide", "active"].includes(rawOptions.newProductStatus)
+        ? rawOptions.newProductStatus
+        : "hide",
+      defaultCategory: rawOptions.defaultCategory || null,
+    };
+
+    const report = {
+      received: rows.length,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      duplicates: 0,
+      pricesUpdated: 0,
+      stockUpdated: 0,
+      statusUpdated: 0,
+      createdCategories: [],
+      errors: [],
+    };
+
+    const addError = (row, message) => {
+      report.skipped += 1;
+      if (report.errors.length < 50) {
+        report.errors.push({
+          rowNumber: row?.rowNumber || null,
+          sku: toImportString(row?.sku),
+          name: toImportString(row?.name),
+          message,
+        });
+      }
+    };
+
+    // 1. סינון שורות לא תקינות + הסרת מק"טים כפולים בתוך האצווה (האחרון קובע)
+    const bySku = new Map();
+    for (const row of rows) {
+      const sku = toImportString(row?.sku);
+      const name = toImportString(row?.name);
+      if (!sku) {
+        addError(row, 'חסר מק"ט');
+        continue;
+      }
+      if (!name) {
+        addError(row, "חסר שם מוצר");
+        continue;
+      }
+      if (bySku.has(sku)) report.duplicates += 1;
+      bySku.set(sku, { ...row, sku, name });
+    }
+
+    const validRows = [...bySku.values()];
+    if (validRows.length === 0) {
+      return res.send({ ...report, message: "לא נמצאו שורות תקינות לייבוא" });
+    }
+
+    // 2. מפת קטגוריות לפי שם (בכל שפה שמוגדרת בקטגוריה)
+    const categories = await Category.find({})
+      .select("name slug parentId")
+      .lean();
+    const categoryByName = new Map();
+    const usedSlugs = new Set();
+    categories.forEach((category) => {
+      if (category.slug) usedSlugs.add(category.slug);
+      Object.values(category?.name || {}).forEach((value) => {
+        if (typeof value === "string" && value.trim()) {
+          const key = normalizeImportName(value);
+          if (!categoryByName.has(key)) categoryByName.set(key, category._id);
+        }
+      });
     });
+
+    // 3. יצירת קטגוריות חסרות מ"שם קבוצה"
+    const neededGroups = [
+      ...new Set(
+        validRows
+          .map((row) => toImportString(row.groupName))
+          .filter((group) => group && !categoryByName.has(normalizeImportName(group)))
+      ),
+    ];
+
+    if (options.createCategories && neededGroups.length > 0) {
+      // קטגוריית השורש ("Home"): גם דף הקטגוריות באדמין וגם התפריטים בחנות
+      // מציגים רק את data[0].children, ולכן קטגוריה שנוצרת בלי parentId
+      // נשמרת במסד אבל לא מופיעה בשום מסך
+      const root = await resolveRootCategory(categories, usedSlugs);
+
+      for (const group of neededGroups) {
+        let slug = buildImportSlug(group) || "category";
+        let attempt = 1;
+        while (usedSlugs.has(slug)) {
+          slug = `${buildImportSlug(group) || "category"}-${++attempt}`;
+        }
+        usedSlugs.add(slug);
+
+        try {
+          const created = await Category.create({
+            name: { he: group, en: group },
+            description: { he: "", en: "" },
+            slug,
+            status: "show",
+            parentId: String(root._id),
+            parentName: root.name,
+          });
+          categoryByName.set(normalizeImportName(group), created._id);
+          report.createdCategories.push(group);
+        } catch (categoryErr) {
+          // יבוא מקביל יכול היה ליצור את אותה קטגוריה בין הקריאה ליצירה.
+          // במקרה כזה משתמשים בקיימת במקום להפיל את כל היבוא
+          const existingCategory = await Category.findOne({ slug })
+            .select("_id")
+            .lean();
+          if (!existingCategory) throw categoryErr;
+          categoryByName.set(normalizeImportName(group), existingCategory._id);
+        }
+      }
+    }
+
+    if (
+      options.defaultCategory &&
+      !mongoose.Types.ObjectId.isValid(options.defaultCategory)
+    ) {
+      return res
+        .status(400)
+        .send({ message: "קטגוריית ברירת המחדל שנשלחה אינה מזהה תקין" });
+    }
+    const fallbackCategoryId = options.defaultCategory
+      ? new mongoose.Types.ObjectId(options.defaultCategory)
+      : null;
+
+    const resolveCategoryId = (row) => {
+      const group = toImportString(row.groupName);
+      if (group) {
+        const found = categoryByName.get(normalizeImportName(group));
+        if (found) return found;
+      }
+      return fallbackCategoryId;
+    };
+
+    // 4. שליפת המוצרים הקיימים לפי מק"ט
+    const skus = validRows.map((row) => row.sku);
+    const existingProducts = [];
+    for (let i = 0; i < skus.length; i += 1000) {
+      const found = await Product.find(importSkuQuery(skus.slice(i, i + 1000)))
+        .select("_id sku slug title prices stock status category categories")
+        .lean();
+      existingProducts.push(...found);
+    }
+    const existingBySku = new Map(
+      existingProducts.map((product) => [toImportString(product.sku), product])
+    );
+
+    // 5. מניעת התנגשות slug עבור מוצרים חדשים
+    const newRows = validRows.filter((row) => !existingBySku.has(row.sku));
+    const takenSlugs = new Set();
+    if (newRows.length > 0) {
+      const candidateSlugs = newRows
+        .map((row) => buildImportSlug(row.name))
+        .filter(Boolean);
+      for (let i = 0; i < candidateSlugs.length; i += 1000) {
+        const found = await Product.find({ slug: { $in: candidateSlugs.slice(i, i + 1000) } })
+          .select("slug")
+          .lean();
+        found.forEach((product) => takenSlugs.add(product.slug));
+      }
+    }
+
+    // 6. בניית פעולות הכתיבה
+    const operations = [];
+
+    for (const row of validRows) {
+      const existing = existingBySku.get(row.sku);
+      const price = resolveImportPrice(row, options);
+      const rawStock = toImportNumber(row.stock);
+      const stock =
+        rawStock === null
+          ? null
+          : options.zeroNegativeStock && rawStock < 0
+          ? 0
+          : rawStock;
+
+      if (existing) {
+        if (!options.updateExisting) continue;
+
+        const set = { erp: buildErpPayload(row) };
+
+        if (options.updateName) {
+          set.title = {
+            ...(existing.title || {}),
+            he: row.name,
+            ...(toImportString(row.nameEn) ? { en: toImportString(row.nameEn) } : {}),
+          };
+        }
+
+        if (options.updateCategory) {
+          const categoryId = resolveCategoryId(row);
+          if (categoryId) {
+            const merged = [
+              ...new Set([
+                ...(existing.categories || []).map((id) => String(id)),
+                String(categoryId),
+              ]),
+            ];
+            set.category = categoryId;
+            set.categories = merged.map((id) => new mongoose.Types.ObjectId(id));
+          }
+        }
+
+        if (options.updatePrices && price > 0) {
+          set.prices = {
+            ...(existing.prices || {}),
+            price,
+            originalPrice: price,
+          };
+          report.pricesUpdated += 1;
+        }
+
+        if (options.updateStock && stock !== null) {
+          set.stock = stock;
+          report.stockUpdated += 1;
+        }
+
+        if (options.updateStatus) {
+          set.status = row.active === false ? "hide" : "show";
+          if (set.status !== existing.status) report.statusUpdated += 1;
+        }
+
+        if (!existing.slug) {
+          let slug = buildImportSlug(row.name) || row.sku;
+          if (takenSlugs.has(slug)) slug = `${slug}-${row.sku}`;
+          takenSlugs.add(slug);
+          set.slug = slug;
+        }
+
+        operations.push({
+          updateOne: { filter: { _id: existing._id }, update: { $set: set } },
+        });
+        report.updated += 1;
+        continue;
+      }
+
+      if (!options.createNew) continue;
+
+      const categoryId = resolveCategoryId(row);
+      if (!categoryId) {
+        addError(
+          row,
+          toImportString(row.groupName)
+            ? `הקטגוריה "${row.groupName}" לא קיימת ולא נבחרה קטגוריית ברירת מחדל`
+            : "לשורה אין קבוצה ולא נבחרה קטגוריית ברירת מחדל"
+        );
+        continue;
+      }
+
+      let slug = buildImportSlug(row.name) || row.sku;
+      if (takenSlugs.has(slug)) slug = `${slug}-${row.sku}`;
+      takenSlugs.add(slug);
+
+      const status =
+        options.newProductStatus === "active"
+          ? row.active === false
+            ? "hide"
+            : "show"
+          : options.newProductStatus;
+
+      operations.push({
+        insertOne: {
+          document: {
+            productId: new mongoose.Types.ObjectId(),
+            sku: row.sku,
+            barcode: "",
+            title: {
+              he: row.name,
+              en: toImportString(row.nameEn) || row.name,
+            },
+            // הערות ההנהח"ש נשמרות ב-erp.notes בלבד. הן פנימיות ואסור
+            // שיהפכו לתיאור המוצר שמוצג ללקוחות בחנות
+            description: { he: "", en: "" },
+            slug,
+            category: categoryId,
+            categories: [categoryId],
+            image: [],
+            stock: stock === null ? 0 : stock,
+            tag: [],
+            prices: {
+              price,
+              originalPrice: price,
+              storePrice: price,
+              discount: 0,
+              offers: [],
+            },
+            variants: [],
+            isCombination: false,
+            status,
+            isVatFree: row.hasVat === true ? false : true,
+            isStoreProduct: false,
+            isCartpprod: "",
+            purchaseLimit: null,
+            weight: "",
+            erp: buildErpPayload(row),
+          },
+        },
+      });
+      report.created += 1;
+      if (price > 0) report.pricesUpdated += 1;
+      if (stock !== null) report.stockUpdated += 1;
+    }
+
+    // 7. כתיבה לבסיס הנתונים באצוות
+    for (let i = 0; i < operations.length; i += 500) {
+      const batch = operations.slice(i, i + 500);
+      if (batch.length === 0) continue;
+      try {
+        // ordered: false -> שורה שנכשלת בולידציה של הסכימה מושמטת בשקט
+        // והשאר נכתבות. קוראים את השגיאות מהתוצאה כדי שלא ייעלמו מהדוח
+        const result = await Product.bulkWrite(batch, { ordered: false });
+        collectValidationErrors(result, report);
+      } catch (bulkErr) {
+        const writeErrors = bulkErr?.writeErrors || [];
+        // כשל בשורה בודדת לא מפיל את כל האצווה - bulkWrite עם ordered:false
+        // כותב את השאר, ולכן רק מתקנים את הספירה ומדווחים
+        writeErrors.forEach((writeError) => {
+          const failed = writeError?.err?.op || writeError?.getOperation?.() || {};
+          const sku = toImportString(failed.sku || failed?.q?.sku);
+          if (failed.insertOne || failed.sku) report.created = Math.max(0, report.created - 1);
+          else report.updated = Math.max(0, report.updated - 1);
+          report.skipped += 1;
+          if (report.errors.length < 50) {
+            report.errors.push({
+              rowNumber: null,
+              sku,
+              name: "",
+              message: writeError?.errmsg || writeError?.err?.errmsg || "כתיבה נכשלה",
+            });
+          }
+        });
+        if (writeErrors.length === 0) throw bulkErr;
+      }
+    }
+
+    res.send({
+      ...report,
+      message: `יובאו ${report.created} מוצרים חדשים, עודכנו ${report.updated} מוצרים`,
+    });
+  } catch (err) {
+    console.log("importProducts error: ", err);
+    res.status(500).send({ message: err.message });
   }
 };
 
@@ -155,142 +694,6 @@ const getFacebookFeedCSV = async (req, res) => {
   }
 };
 
-// פונקציה לדירוג תוצאות לפי קרבה לשאילתא המקורית
-const rankProductsByRelevance = (products, originalQuery, queryWords, variations = []) => {
-  // console.log('originalQuery :>> ', originalQuery);
-  // console.log('queryWords :>> ', queryWords);
-  // console.log('variations :>> ', variations);
-
-  const normalizeForComparison = (text) => {
-    return text.toLowerCase()
-      .replace(/['"''`ʼʻ]/g, '') // הסרת גרשים
-      .replace(/[^\u0590-\u05ffa-z0-9\s]/g, ' ') // הסרת סימנים מיוחדים
-      .replace(/\s+/g, ' ')
-      .trim();
-  };
-
-  // פונקציה משופרת לבדיקה אם מילה מופיעה כמילה שלמה (תומכת בעברית)
-  const isWholeWordMatch = (text, word) => {
-    // פיצול הטקסט למילים ובדיקה אם המילה מופיעה כמילה נפרדת
-    const words = text.split(/\s+/);
-    return words.some(textWord => textWord === word);
-  };
-
-  return products.map(product => {
-    const heTitle = normalizeForComparison(product.title.he || '');
-    const enTitle = normalizeForComparison(product.title.en || '');
-    const normalizedQuery = normalizeForComparison(originalQuery);
-
-    let score = 0;
-
-    // 1. בדיקה אם יש התאמה מושלמת לאחת מה-variations (הציון הכי גבוה!)
-    let foundPerfectVariationMatch = false;
-    if (variations && variations.length > 0) {
-      for (const variation of variations) {
-        const normalizedVariation = normalizeForComparison(variation);
-        if (heTitle === normalizedVariation || enTitle === normalizedVariation) {
-          score += 15000; // ציון הכי גבוה - התאמה מושלמת לווריאציה
-          foundPerfectVariationMatch = true;
-          break;
-        }
-        // בדיקה אם הווריאציה מופיעה כמילה שלמה בתחילת השם
-        else if (heTitle.startsWith(normalizedVariation + ' ') || enTitle.startsWith(normalizedVariation + ' ') ||
-          heTitle.startsWith(normalizedVariation + '(') || enTitle.startsWith(normalizedVariation + '(')) {
-          score += 12000; // ציון גבוה מאוד - ווריאציה בתחילת השם
-          foundPerfectVariationMatch = true;
-          break;
-        }
-      }
-    }
-
-    // 2. התאמה מדויקת של השאילתה המעובדת (אם לא מצאנו התאמה מושלמת לווריאציה)
-    if (!foundPerfectVariationMatch) {
-      if (heTitle === normalizedQuery || enTitle === normalizedQuery) {
-        score += 10000; // ציון גבוה להתאמה מושלמת לשאילתה המעובדת
-      }
-      // 3. התאמה של המחרוזת השלמה כ-substring
-      else if (heTitle.includes(normalizedQuery) || enTitle.includes(normalizedQuery)) {
-        score += 5000; // ציון גבוה אבל פחות מהתאמה מושלמת
-
-        // בונוס אם זה בתחילת השם
-        if (heTitle.startsWith(normalizedQuery) || enTitle.startsWith(normalizedQuery)) {
-          score += 2000;
-        }
-      }
-    }
-
-    // 4. בדיקת התאמה של מילים בודדות - מילה שלמה vs חלק ממילה
-    let wordMatchScore = 0;
-    let foundWholeWords = 0;
-    let foundPartialWords = 0;
-
-    // בדיקה גם מול הvariations
-    const allWordsToCheck = [...queryWords];
-    if (variations && variations.length > 0) {
-      // נוסיף את כל הvariations כמילים לבדיקה
-      variations.forEach(variation => {
-        const variationWords = variation.trim().split(/\s+/).filter(word => word.length > 1);
-        allWordsToCheck.push(...variationWords);
-      });
-    }
-
-    // הסרת כפילויות
-    const uniqueWordsToCheck = [...new Set(allWordsToCheck.map(w => normalizeForComparison(w)))];
-
-    uniqueWordsToCheck.forEach(word => {
-      // בדיקה להתאמה של מילה שלמה
-      const heWholeMatch = isWholeWordMatch(heTitle, word);
-      const enWholeMatch = isWholeWordMatch(enTitle, word);
-
-      if (heWholeMatch || enWholeMatch) {
-        foundWholeWords++;
-
-        // ציון גבוה יותר אם המילה מופיעה בvariations המקוריות
-        const isFromOriginalVariation = variations && variations.some(v =>
-          normalizeForComparison(v).includes(word)
-        );
-
-        const baseScore = isFromOriginalVariation ? 4000 : 3000;
-        wordMatchScore += baseScore; // ציון גבוה מאוד למילה שלמה
-
-        // בונוס אם המילה השלמה בתחילת השם
-        const titleToCheck = heWholeMatch ? heTitle : enTitle;
-        if (titleToCheck.startsWith(word + ' ') || titleToCheck === word) {
-          wordMatchScore += isFromOriginalVariation ? 1500 : 1000;
-        }
-      }
-      // אם לא מצאנו התאמה שלמה, בדוק כ-substring
-      else if (heTitle.includes(word) || enTitle.includes(word)) {
-        foundPartialWords++;
-        wordMatchScore += 500; // ציון נמוך יותר לחלק ממילה
-      }
-    });
-
-    score += wordMatchScore;
-
-    // 5. ציון לפי אחוז המילים שנמצאו (עדיפות למילים שלמות)
-    const totalWords = uniqueWordsToCheck.length;
-    if (totalWords > 0) {
-      const wholeWordPercentage = (foundWholeWords / totalWords) * 100;
-      const partialWordPercentage = (foundPartialWords / totalWords) * 100;
-
-      score += wholeWordPercentage * 10; // משקל גבוה למילים שלמות
-      score += partialWordPercentage * 2;  // משקל נמוך למילים חלקיות
-    }
-
-    // 6. בונוס קל לשמות קצרים יותר (רק אם יש התאמה טובה)
-    if (foundWholeWords > 0) {
-      const titleLength = heTitle.length || enTitle.length;
-      if (titleLength > 0) {
-        score += Math.max(0, 30 - titleLength / 5); // בונוס גבוה יותר לשמות קצרים
-      }
-    }
-
-    // console.log(`Product: "${product.title.he}" - WholeWords: ${foundWholeWords}, PartialWords: ${foundPartialWords}, Score: ${score}`);
-
-    return { product, score };
-  }).sort((a, b) => b.score - a.score);
-};
 
 // קבלת מוצר על פי חיפוש קולי
 const findProductByTranscript = async (req, res) => {
@@ -322,57 +725,7 @@ const findProductByTranscript = async (req, res) => {
   /* ─── 2. חיפוש בדאטה־בייס ─── */
   try {
     // יצירת תנאי חיפוש מרובה - כולל ווריאציות צליליות
-    const searchConditions = [];
-
-    // חיפוש עבור השאילתה הבסיסית וכל הווריאציות הצליליות
-    const allQueries = variations && variations.length > 0 ? variations : [query];
-
-    allQueries.forEach(currentQuery => {
-      // פיצול השאילתה למילים נפרדות
-      const queryWords = currentQuery.trim().split(/\s+/).filter(word => word.length > 1);
-
-      // חיפוש רגיל (מחרוזת שלמה) - עם התעלמות מגרשים
-      const fullRegex = createApostropheIgnoringRegex(currentQuery);
-      searchConditions.push(
-        { 'title.he': fullRegex },
-        { 'title.en': fullRegex },
-        { slug: fullRegex },
-        { sku: currentQuery },
-        { barcode: currentQuery }
-      );
-
-      // חיפוש מתקדם - כל מילה בנפרד (טוב לטיפול בסוגריים ואותיות סופיות)
-      if (queryWords.length > 0) {
-        // יצירת רגקסים עם ווריאציות של כל מילה (אותיות סופיות + זכר/נקבה)
-        const wordVariationsRegexes = queryWords.map(word => {
-          const hebrewVariations = generateHebrewVariations(word);
-          // console.log(`🔍 Variations for "${word}":`, hebrewVariations);
-
-          // יצירת regex שמחפש כל אחת מהווריאציות תוך התעלמות מגרשים
-          const variationsWithoutApostrophes = hebrewVariations.map(v =>
-            createApostropheIgnoringRegex(v).source
-          );
-          const variationsPattern = variationsWithoutApostrophes.join('|');
-          // console.log(`📝 Regex pattern for "${word}": ${variationsPattern}`);
-          return new RegExp(variationsPattern, 'i');
-        });
-
-        // תנאי שכל המילים (או הווריאציות שלהן) צריכות להופיע בכותרת העברית
-        const heAllWordsCondition = {
-          $and: wordVariationsRegexes.map(regex => ({ 'title.he': regex }))
-        };
-
-        // תנאי שכל המילים צריכות להופיע בכותרת האנגלית (עם התעלמות מגרשים)
-        const enAllWordsCondition = {
-          $and: queryWords.map(word => ({ 'title.en': createApostropheIgnoringRegex(word) }))
-        };
-
-        searchConditions.push(heAllWordsCondition, enAllWordsCondition);
-      }
-    });
-
-    // console.log('searchConditions :>> ');
-    // console.dir(searchConditions, { depth: null, colors: true });
+    const searchConditions = buildProductSearchConditions(query, variations);
 
     // שינוי מ-findOne ל-find כדי לקבל מספר תוצאות
     const products = await Product.find({
@@ -603,12 +956,82 @@ const getProductById = async (req, res) => {
   }
 };
 
+// כרטיס מוצר מלא למסך "צפייה במוצר" באדמין: שדות החנות יחד עם נתוני
+// ההנהח"ש מיבוא האקסל. erp מוגדר select:false במודל וצריך לבקש אותו במפורש -
+// בלי זה אין שום מסך שמציג את הברקוד, הספק, העלות ושאר הנתונים מהקובץ.
+// שימו לב: select("+erp") על השדה כולו עובד, select("+erp.x") על תת-שדה לא.
+const getProductDetails = async (req, res) => {
+  try {
+    const product = await Product.findById(req.params.id)
+      .select("+erp")
+      .populate({ path: "category", select: "_id name" })
+      .populate({ path: "categories", select: "_id name" })
+      .lean();
+
+    if (!product) {
+      return res.status(404).send({ message: "מוצר לא נמצא" });
+    }
+
+    res.send(product);
+  } catch (err) {
+    console.log("getProductDetails error: ", err);
+    // מזהה שאינו ObjectId תקין מפיל את findById ב-CastError. בלי ההפרדה הזו
+    // הפאנל היה מציג שגיאת שרת פנימית עם נוסח של mongoose במקום "מוצר לא נמצא"
+    if (err?.name === "CastError") {
+      return res.status(404).send({ message: "מוצר לא נמצא" });
+    }
+    res.status(500).send({
+      message: err.message,
+    });
+  }
+};
+
+// שדות ההנהח"ש שניתן לערוך ידנית בפאנל. syncedAt לא נכלל בכוונה - הוא מסמן
+// מתי הנתונים הגיעו מהאקסל, ועריכה ידנית לא אמורה לשנות אותו
+const ERP_EDITABLE_TEXT = [
+  "barcode",
+  "barcode2",
+  "externalSku",
+  "supplierSku",
+  "unit",
+  "supplierName",
+  "groupName",
+  "currency",
+  "notes",
+];
+const ERP_EDITABLE_NUMBER = [
+  "supplierNumber",
+  "groupCode",
+  "departmentCode",
+  "cost",
+];
+
+// ממזג את שדות ההנהח"ש שנשלחו מהטופס לתוך הערכים הקיימים. שדה שלא נשלח
+// נשאר כפי שהוא, כדי שטופס חלקי לא ימחק נתונים שהגיעו מהאקסל
+const mergeErpPayload = (existing, incoming) => {
+  const merged = { ...(existing || {}) };
+  ERP_EDITABLE_TEXT.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(incoming, field)) {
+      merged[field] = toImportString(incoming[field]);
+    }
+  });
+  ERP_EDITABLE_NUMBER.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(incoming, field)) {
+      // toImportNumber מחזיר null לערך ריק - מספר ריק נשמר כחסר ולא כאפס
+      merged[field] = toImportNumber(incoming[field]);
+    }
+  });
+  return merged;
+};
+
 const updateProduct = async (req, res) => {
   // console.log('req.body: ', req.body)
   // console.log('update product')
   // console.log('variant',req.body.variants)
   try {
-    const product = await Product.findById(req.params.id);
+    // select("+erp") הכרחי: השדה מוגדר select:false, ובלעדיו mongoose לא טוען
+    // אותו והשמירה הייתה מוחקת את נתוני ההנהח"ש מהמוצר
+    const product = await Product.findById(req.params.id).select("+erp");
     // console.log("product", product);
 
     if (product) {
@@ -647,6 +1070,15 @@ const updateProduct = async (req, res) => {
       if (req.body.hasOwnProperty("isCartpprod")) product.isCartpprod = req.body.isCartpprod;
       product.purchaseLimit = req.body.purchaseLimit;
       if (req.body.hasOwnProperty("weight")) product.weight = req.body.weight;
+
+      // נתוני ההנהח"ש נערכים ידנית מהפאנל. שים לב: יבוא אקסל הבא של אותו
+      // מק"ט ידרוס את הערכים האלה בחזרה לערכי הקובץ
+      if (req.body.erp && typeof req.body.erp === "object") {
+        product.erp = mergeErpPayload(
+          product.erp ? product.erp.toObject() : {},
+          req.body.erp
+        );
+      }
 
       await product.save();
 
@@ -1019,13 +1451,15 @@ const deleteManyProducts = async (req, res) => {
 
 module.exports = {
   addProduct,
-  addAllProducts,
+  importProducts,
+  checkImportProducts,
   getAllProducts,
   getShowingProducts,
   getCartProducts,
   getFacebookFeedCSV,
   findProductByTranscript,
   getProductById,
+  getProductDetails,
   getProductBySlug,
   updateProduct,
   updateProductPrice,

@@ -1,6 +1,28 @@
 // models/Product.js
 const mongoose = require("mongoose");
 
+// נתוני ההנהלת חשבונות מיבוא האקסל ("רשימת המוצרים - כל הספקים").
+// מוחזק בנפרד כדי שהיבוא לא ידרוך על שדות החנות (למשל barcode שהוא מספר סידורי)
+const ProductErpSchema = new mongoose.Schema(
+  {
+    barcode: { type: String, required: false },
+    barcode2: { type: String, required: false },
+    externalSku: { type: String, required: false },
+    supplierSku: { type: String, required: false },
+    unit: { type: String, required: false },
+    supplierName: { type: String, required: false },
+    supplierNumber: { type: Number, required: false },
+    groupName: { type: String, required: false },
+    groupCode: { type: Number, required: false },
+    departmentCode: { type: Number, required: false },
+    cost: { type: Number, required: false },
+    currency: { type: String, required: false },
+    notes: { type: String, required: false },
+    syncedAt: { type: Date, required: false },
+  },
+  { _id: false }
+);
+
 const productSchema = new mongoose.Schema(
   {
     productId: {
@@ -124,6 +146,15 @@ const productSchema = new mongoose.Schema(
     weight: {
       type: String,
       required: false,
+    },
+
+    // נתוני ההנהח"ש מיבוא האקסל. select: false כדי שעלויות ושמות ספקים
+    // לא ייצאו בתגובות של החנות - שאילתה שצריכה אותם מבקשת אותם במפורש
+    // ב-select("... erp"). שימו לב: select("+erp.x") על תת-שדה לא עובד.
+    erp: {
+      type: ProductErpSchema,
+      required: false,
+      select: false,
     },
   },
   {

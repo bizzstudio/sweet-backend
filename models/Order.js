@@ -223,6 +223,48 @@ const orderSchema = new mongoose.Schema(
       required: false,
       default: null,
     },
+    // מקור ההזמנה. בכוונה בלי default — הזמנות קיימות נשארות בלי השדה,
+    // וחוסר בשדה משמעותו הזמנה רגילה מהחנות.
+    // "email" / "whatsapp" = נקלטה אוטומטית מהודעה נכנסת (lib/order-ingestion).
+    source: {
+      type: String,
+      required: false,
+    },
+    // ההודעה הנכנסת שממנה נוצרה ההזמנה (לתחקור מול הטקסט המקורי)
+    incomingOrder: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "IncomingOrder",
+      required: false,
+    },
+    // פרטי הכשל בקריאה, כשההזמנה נקלטה אוטומטית אבל לא נקראה במלואה.
+    // ההזמנה נוצרת עם מה שכן נקרא, בסטטוס "שגיאה בקריאה", והשדה הזה הוא מה
+    // שמוצג לעובד בדשבורד כדי שידע מה להשלים.
+    ingestionError: {
+      code: { type: String, required: false },
+      message: { type: String, required: false },
+      // פריטים שהלקוח ביקש ולא זוהו בקטלוג — הם *אינם* בעגלה, ולכן זה המקום
+      // היחיד שבו הם מתועדים על ההזמנה
+      unmatchedItems: {
+        type: [
+          {
+            rawName: { type: String },
+            quantity: { type: Number },
+            unit: { type: String },
+            note: { type: String },
+            failReason: { type: String },
+            _id: false,
+          },
+        ],
+        required: false,
+        default: undefined,
+      },
+      confidence: { type: Number, required: false },
+      // הטקסט המקורי של הלקוח, כדי שלא יידרש מסך נוסף כדי להבין מה הוא ביקש
+      rawText: { type: String, required: false },
+      // מתי ומי סימן שהשגיאה טופלה
+      resolvedAt: { type: Date, required: false },
+      resolvedBy: { type: String, required: false },
+    },
   },
   {
     timestamps: true,

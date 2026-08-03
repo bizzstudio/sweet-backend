@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 const Customer = require("../models/Customer");
+const Admin = require("../models/Admin");
 const Application = require("../models/Application");
 const Setting = require("../models/Setting");
 const OtpCode = require("../models/OtpCode");
@@ -27,6 +28,32 @@ const { assignWelcomeGiftToCustomer } = require("../utils/welcomeGift");
 
 const PHONE_TAKEN_MESSAGE =
   "מספר הטלפון הזה כבר רשום במערכת. ניתן להתחבר באמצעות המספר וקוד ב-SMS.";
+
+// תפקידי צוות שרשאים לערוך ולמחוק לקוחות. חייב לכלול את "Super Admin" - זהו
+// תפקיד ברירת המחדל של המשתמש שנוצר ב-script/create-admin.js וב-script/init-db.js,
+// כלומר בלעדיו דווקא בעל ההרשאות הגבוה ביותר נחסם.
+// שאר התפקידים במודל (Manager, Cashier, Driver, Accountant, Security Guard)
+// לא נכללים בכוונה - הוספה כאן היא הרחבת הרשאות ודורשת החלטה עסקית
+const CUSTOMER_MANAGER_ROLES = ["Admin", "Super Admin", "CEO"];
+
+// עדכון/מחיקת לקוח מותרים ללקוח עצמו, או לאיש צוות פעיל בעל תפקיד ניהולי.
+// המסלולים האלה מוגנים ב-isAuth (כי גם לקוח מעדכן דרכם את הפרופיל שלו), ולכן
+// התפקיד נבדק כאן מול טבלת האדמינים ולא נלקח מהטוקן: הטוקן תקף 21 יום, ובלי
+// הבדיקה הזו איש צוות שהושבת, נמחק או הורד בדרגה היה ממשיך לנהל לקוחות עד לפקיעתו.
+// שאילתה נוספת מתבצעת רק במסלול הצוות - לקוח שמעדכן את עצמו יוצא מיד
+const canManageCustomer = async (user, customer) => {
+  const email = user?.email;
+  // בלי שתי הבדיקות האלה שני ערכים ריקים היו נחשבים לזהים ומאשרים גישה
+  if (!email || !customer?.email) return false;
+  if (email === customer.email) return true;
+
+  const staff = await Admin.findOne({ email }).select("role status").lean();
+  return (
+    !!staff &&
+    staff.status !== "Inactive" &&
+    CUSTOMER_MANAGER_ROLES.includes(staff.role)
+  );
+};
 
 // בודק אם המספר כבר משויך ללקוח רשום קיים (חוץ מהרשומה שמשדרגים, אם יש).
 // כניסה בטלפון מזהה לקוח לפי המספר בלבד, ולכן שני חשבונות רשומים עם אותו מספר
@@ -219,18 +246,480 @@ const registerCustomer = async (req, res) => {
   }
 };
 
-const addAllCustomers = async (req, res) => {
+/* ------------------------------------------------------------------ *
+ * יבוא לקוחות מקובץ אקסל של ההנהח"ש ("רשימת לקוחות")
+ * העמודות מפוענחות בצד האדמין ונשלחות לכאן כשורות מנורמלות.
+ * ההתאמה לפי מספר לקוח -> אימייל -> נייד. אין מחיקות ואין שינוי סיסמאות.
+ * ------------------------------------------------------------------ */
+
+const IMPORT_MAX_ROWS = 2000;
+// דומיין פנימי ללקוחות מההנהח"ש שאין להם כתובת מייל.
+// אימייל הוא שדה חובה וייחודי, ובלי סיסמה הם לא יכולים להתחבר.
+const IMPORT_EMAIL_DOMAIN = "import.local";
+
+const toImportText = (value) => {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+};
+
+const toImportNum = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  // ערך שכבר הגיע כמספר עובר כמו שהוא. ניקוי התווים למטה נועד למחרוזות
+  // עם סימני מטבע ופסיקים, אבל הוא הורס סימון מדעי שאקסל מייצר לערכים
+  // קטנים או גדולים מאוד: 7.1e-15 הפך ל-null ו-1e21 הפך ל-121 בשקט
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  const raw = String(value).trim();
+  // מחרוזת שכולה מספר תקין (כולל סימון מדעי) נקראת ישירות
+  const direct = Number(raw);
+  if (raw !== "" && Number.isFinite(direct)) return direct;
+  // ניקוי סימני מטבע/אחוז/פסיקים. בלי בדיקת הספרה, ערך שאין בו מספר כלל
+  // ("abc", "-", רווחים) היה מנוקה למחרוזת ריקה, ו-Number("") מחזיר 0 - כלומר
+  // זבל נשמר כאפס במקום להיחשב ריק, ובניגוד לפענוח בצד האדמין שמחזיר null
+  const cleaned = raw.replace(/[^\d.,-]/g, "").replace(/,/g, "");
+  if (!/\d/.test(cleaned)) return null;
+  const num = Number(cleaned);
+  return Number.isFinite(num) ? num : null;
+};
+
+const toImportDate = (value) => {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const placeholderEmailFor = (customerNumber) =>
+  `erp-${toImportText(customerNumber).toLowerCase()}@${IMPORT_EMAIL_DOMAIN}`;
+
+// "עיר" בקובץ מכילה לפעמים הערת אספקה ("לחנות במידטאון ולקחת מדבקה")
+// ולא שם עיר. ערך כזה לא נכנס לשדה העיר אלא נשמר כטקסט חופשי.
+const looksLikeCityName = (value) => {
+  const text = toImportText(value);
+  if (!text || text.length > 20) return false;
+  if (/\d/.test(text)) return false;
+  return text.split(/\s+/).length <= 3;
+};
+
+const buildCustomerErp = (row) => ({
+  customerNumber: toImportText(row.customerNumber),
+  contactPerson: toImportText(row.contactPerson),
+  notes: toImportText(row.notes),
+  idNumber: toImportText(row.idNumber),
+  active: row.active === false ? false : true,
+  points: toImportNum(row.points),
+  discountPercent: toImportNum(row.discountPercent),
+  cumulativePurchase: toImportNum(row.cumulativePurchase),
+  credit: toImportNum(row.credit),
+  openingBalance: toImportNum(row.openingBalance),
+  agent: toImportText(row.agent),
+  customerType: toImportText(row.customerType),
+  priceLevel: toImportNum(row.priceLevel),
+  paymentTerms: toImportNum(row.paymentTerms),
+  rawEmail: toImportText(row.email),
+  rawAddress: toImportText(row.address),
+  rawCity: toImportText(row.city),
+  mobile: toImportText(row.mobile),
+  landline: toImportText(row.landline),
+  birthDate: toImportDate(row.birthDate),
+  openDate: toImportDate(row.openDate),
+  lastPurchaseAt: toImportDate(row.lastPurchaseDate),
+  syncedAt: new Date(),
+});
+
+const buildCustomerAddress = (row, existingAddress = {}) => {
+  const city = looksLikeCityName(row.city)
+    ? { city_name_he: toImportText(row.city) }
+    : existingAddress?.city;
+
+  // כשה"עיר" היא בעצם הערה, היא נשמרת בסוף שורת הכתובת כדי לא לאבד אותה
+  const streetParts = [toImportText(row.address)];
+  if (toImportText(row.city) && !looksLikeCityName(row.city)) {
+    streetParts.push(toImportText(row.city));
+  }
+
+  return {
+    ...(existingAddress || {}),
+    ...(city ? { city } : {}),
+    street: streetParts.filter(Boolean).join(", "),
+    postalCode: toImportText(row.postalCode) || existingAddress?.postalCode || "",
+  };
+};
+
+// בדיקה מקדימה לפני היבוא: מה קיים במערכת
+// מגבלה על גודל הבדיקה המקדימה כדי שלא תיבנה שאילתת $in ענקית
+const CHECK_MAX_VALUES = 20000;
+
+const checkImportCustomers = async (req, res) => {
   try {
-    await Customer.deleteMany();
-    await Customer.insertMany(req.body);
+    const numbers = (Array.isArray(req.body?.customerNumbers) ? req.body.customerNumbers : [])
+      .map((value) => toImportText(value))
+      .filter(Boolean);
+    const emails = (Array.isArray(req.body?.emails) ? req.body.emails : [])
+      .map((value) => toImportText(value).toLowerCase())
+      .filter(Boolean);
+    const phones = (Array.isArray(req.body?.phones) ? req.body.phones : [])
+      .map((value) => toImportText(value))
+      .filter(Boolean);
+
+    if (
+      numbers.length > CHECK_MAX_VALUES ||
+      emails.length > CHECK_MAX_VALUES ||
+      phones.length > CHECK_MAX_VALUES
+    ) {
+      return res
+        .status(400)
+        .send({ message: `ניתן לבדוק עד ${CHECK_MAX_VALUES} רשומות בכל בקשה` });
+    }
+
+    const matchedNumbers = new Set();
+    const matchedEmails = new Set();
+    const matchedPhones = new Set();
+    const chunkSize = 1000;
+
+    for (let i = 0; i < numbers.length; i += chunkSize) {
+      const found = await Customer.find({
+        "erp.customerNumber": { $in: numbers.slice(i, i + chunkSize) },
+      })
+        .select("erp.customerNumber")
+        .lean();
+      found.forEach((c) => matchedNumbers.add(toImportText(c?.erp?.customerNumber)));
+    }
+
+    for (let i = 0; i < emails.length; i += chunkSize) {
+      const found = await Customer.find({ email: { $in: emails.slice(i, i + chunkSize) } })
+        .select("email")
+        .lean();
+      found.forEach((c) => matchedEmails.add(toImportText(c.email).toLowerCase()));
+    }
+
+    const phoneQuery = [...new Set(phones.flatMap((phone) => phoneVariations(phone)))];
+    for (let i = 0; i < phoneQuery.length; i += chunkSize) {
+      const found = await Customer.find({ phone: { $in: phoneQuery.slice(i, i + chunkSize) } })
+        .select("phone")
+        .lean();
+      found.forEach((c) => matchedPhones.add(canonicalPhone(c.phone) || toImportText(c.phone)));
+    }
+
+    const totalCustomers = await Customer.countDocuments();
+
     res.send({
-      message: "Added all users successfully!",
+      matchedByNumber: matchedNumbers.size,
+      matchedByEmail: matchedEmails.size,
+      matchedByPhone: matchedPhones.size,
+      existingNumbers: [...matchedNumbers],
+      existingEmails: [...matchedEmails],
+      totalCustomers,
     });
   } catch (err) {
-    console.log('addAllCustomers error: ', err);
-    res.status(500).send({
-      message: err.message,
+    console.log("checkImportCustomers error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
+const importCustomers = async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    const rawOptions = req.body?.options || {};
+
+    if (rows.length === 0) {
+      return res.status(400).send({ message: "לא נשלחו שורות לייבוא" });
+    }
+    if (rows.length > IMPORT_MAX_ROWS) {
+      return res
+        .status(400)
+        .send({ message: `ניתן לשלוח עד ${IMPORT_MAX_ROWS} שורות בכל בקשה` });
+    }
+
+    const options = {
+      createNew: rawOptions.createNew !== false,
+      updateExisting: rawOptions.updateExisting !== false,
+      updateName: !!rawOptions.updateName,
+      updatePhone: !!rawOptions.updatePhone,
+      updateAddress: !!rawOptions.updateAddress,
+      placeholderEmail: rawOptions.placeholderEmail !== false,
+      matchByPhone: rawOptions.matchByPhone !== false,
+    };
+
+    const report = {
+      received: rows.length,
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      duplicates: 0,
+      placeholderEmails: 0,
+      emailsUpgraded: 0,
+      emailConflicts: 0,
+      matchedByNumber: 0,
+      matchedByEmail: 0,
+      matchedByPhone: 0,
+      errors: [],
+    };
+
+    const addError = (row, message) => {
+      report.skipped += 1;
+      if (report.errors.length < 50) {
+        report.errors.push({
+          rowNumber: row?.rowNumber || null,
+          customerNumber: toImportText(row?.customerNumber),
+          name: toImportText(row?.name),
+          message,
+        });
+      }
+    };
+
+    // 1. סינון שורות לא תקינות + הסרת מספרי לקוח כפולים באצווה
+    const byNumber = new Map();
+    for (const row of rows) {
+      const customerNumber = toImportText(row?.customerNumber);
+      const name = toImportText(row?.name);
+      const email = toImportText(row?.email).toLowerCase();
+      const phone = toImportText(row?.phone);
+
+      if (!name) {
+        addError(row, "חסר שם לקוח");
+        continue;
+      }
+      if (!customerNumber) {
+        addError(row, "חסר מספר לקוח");
+        continue;
+      }
+      // החלטה מכוונת: לקוח מיובא גם בלי אימייל וגם בלי טלפון. המזהה שלו
+      // נבנה ממספר הלקוח בהנהח"ש (erp-<מספר>@import.local), ובלי סיסמה הוא
+      // לא יכול להתחבר. אין להוסיף כאן דילוג על פרטי קשר חסרים.
+      // הדילוג היחיד הוא כשהיבוא הופעל בלי מזהה מחליף, ואז אין מה לשים
+      // בשדה האימייל שהוא חובה וייחודי
+      if (!email && !options.placeholderEmail) {
+        addError(row, "אין כתובת אימייל");
+        continue;
+      }
+
+      if (byNumber.has(customerNumber)) report.duplicates += 1;
+      byNumber.set(customerNumber, { ...row, customerNumber, name, email, phone });
+    }
+
+    const validRows = [...byNumber.values()];
+    if (validRows.length === 0) {
+      return res.send({ ...report, message: "לא נמצאו שורות תקינות לייבוא" });
+    }
+
+    // 2. שליפת הלקוחות הקיימים לפי שלושת המזהים
+    const numbers = validRows.map((row) => row.customerNumber);
+    const emails = [...new Set(validRows.map((row) => row.email).filter(Boolean))];
+    const placeholders = validRows.map((row) => placeholderEmailFor(row.customerNumber));
+    const phones = options.matchByPhone
+      ? [
+          ...new Set(
+            validRows
+              .map((row) => row.phone)
+              .filter((phone) => isValidIsraeliMobile(phone))
+              .flatMap((phone) => phoneVariations(phone))
+          ),
+        ]
+      : [];
+
+    const found = [];
+    const fetchInChunks = async (query, values) => {
+      for (let i = 0; i < values.length; i += 1000) {
+        const docs = await Customer.find(query(values.slice(i, i + 1000)))
+          .select("_id name email phone address erp")
+          .lean();
+        found.push(...docs);
+      }
+    };
+
+    await fetchInChunks((chunk) => ({ "erp.customerNumber": { $in: chunk } }), numbers);
+    await fetchInChunks((chunk) => ({ email: { $in: chunk } }), [
+      ...emails,
+      ...placeholders,
+    ]);
+    if (phones.length) {
+      await fetchInChunks((chunk) => ({ phone: { $in: chunk } }), phones);
+    }
+
+    const byId = new Map(found.map((doc) => [String(doc._id), doc]));
+    const existingByNumber = new Map();
+    // אימייל וטלפון מוחזקים כרשימת מועמדים ולא כמסמך בודד: כמה לקוחות
+    // יכולים לחלוק טלפון של איש קשר, ושמירת הראשון בלבד הייתה מפילה מועמד
+    // שכן ניתן לקשר ויוצרת לקוח כפול
+    const existingByEmail = new Map();
+    const existingByPhone = new Map();
+    const pushCandidate = (map, key, doc) => {
+      if (!key) return;
+      const list = map.get(key);
+      if (list) list.push(doc);
+      else map.set(key, [doc]);
+    };
+    byId.forEach((doc) => {
+      const number = toImportText(doc?.erp?.customerNumber);
+      if (number && !existingByNumber.has(number)) existingByNumber.set(number, doc);
+      pushCandidate(existingByEmail, toImportText(doc.email).toLowerCase(), doc);
+      pushCandidate(existingByPhone, canonicalPhone(doc.phone), doc);
     });
+
+    // 3. בניית פעולות הכתיבה
+    const operations = [];
+    const usedEmails = new Set([...existingByEmail.keys()]);
+    // מבין המועמדים לאותו אימייל/טלפון בוחרים את זה שאפשר לקשר לשורה
+    const pickLinkable = (map, key, row) =>
+      (map.get(key) || []).find((candidate) => isLinkableTo(candidate, row));
+    const handledIds = new Set();
+
+    // התאמה לפי אימייל/נייד מותרת רק ללקוח שאינו כבר מקושר למספר לקוח אחר
+    // בהנהח"ש. בלי התנאי הזה שתי חברות שחולקות טלפון של איש קשר היו נדרסות
+    // ללקוח אחד, ורשומה אחת מההנהח"ש הייתה נעלמת.
+    const isLinkableTo = (candidate, row) => {
+      if (!candidate) return false;
+      const linked = toImportText(candidate?.erp?.customerNumber);
+      return !linked || linked === row.customerNumber;
+    };
+
+    for (const row of validRows) {
+      let existing = existingByNumber.get(row.customerNumber);
+      let matchedBy = existing ? "number" : "";
+
+      if (!existing && row.email) {
+        const candidate = pickLinkable(existingByEmail, row.email, row);
+        if (candidate) {
+          existing = candidate;
+          matchedBy = "email";
+        }
+      }
+      if (!existing && options.matchByPhone && isValidIsraeliMobile(row.phone)) {
+        const candidate = pickLinkable(
+          existingByPhone,
+          canonicalPhone(row.phone),
+          row
+        );
+        if (candidate) {
+          existing = candidate;
+          matchedBy = "phone";
+        }
+      }
+
+      // לקוח קיים שכבר טופל בשורה אחרת באותה אצווה - לא נוגעים בו פעמיים
+      if (existing && handledIds.has(String(existing._id))) {
+        report.duplicates += 1;
+        continue;
+      }
+
+      const erp = buildCustomerErp(row);
+
+      if (existing) {
+        if (!options.updateExisting) continue;
+        handledIds.add(String(existing._id));
+        if (matchedBy === "number") report.matchedByNumber += 1;
+        if (matchedBy === "email") report.matchedByEmail += 1;
+        if (matchedBy === "phone") report.matchedByPhone += 1;
+
+        const set = { erp };
+        if (options.updateName) set.name = row.name;
+        if (options.updatePhone && row.phone) set.phone = row.phone;
+        if (options.updateAddress && (row.address || row.city || row.postalCode)) {
+          set.address = buildCustomerAddress(row, existing.address);
+        }
+
+        // לקוח שיובא בעבר עם מזהה פנימי (בגלל שלא הייתה לו כתובת) מקבל את
+        // כתובת האימייל האמיתית ברגע שהיא מופיעה בקובץ. כתובת אמיתית קיימת
+        // לא נדרסת אף פעם - היא המזהה שאיתו הלקוח מתחבר.
+        const existingEmail = toImportText(existing.email).toLowerCase();
+        const isPlaceholder = existingEmail.endsWith(`@${IMPORT_EMAIL_DOMAIN}`);
+        if (isPlaceholder && row.email && !usedEmails.has(row.email)) {
+          set.email = row.email;
+          usedEmails.add(row.email);
+          report.emailsUpgraded += 1;
+        }
+
+        operations.push({
+          updateOne: { filter: { _id: existing._id }, update: { $set: set } },
+        });
+        report.updated += 1;
+        continue;
+      }
+
+      if (!options.createNew) continue;
+
+      // אימייל הוא מזהה ייחודי. אם המייל מהקובץ כבר תפוס בלקוח אחר,
+      // הלקוח הזה נשמר עם מייל פנימי כדי לא לאבד אותו (המקורי נשמר ב-erp)
+      let email = row.email;
+      if (!email) {
+        email = placeholderEmailFor(row.customerNumber);
+        report.placeholderEmails += 1;
+      } else if (usedEmails.has(email)) {
+        email = placeholderEmailFor(row.customerNumber);
+        report.emailConflicts += 1;
+      }
+
+      if (usedEmails.has(email)) {
+        addError(row, `כתובת האימייל ${email} כבר בשימוש`);
+        continue;
+      }
+      usedEmails.add(email);
+
+      operations.push({
+        insertOne: {
+          document: {
+            name: row.name,
+            lastName: "",
+            email,
+            phone: row.phone || "",
+            address: buildCustomerAddress(row),
+            isRegistered: false,
+            inBlackList: false,
+            isCashier: false,
+            erp,
+          },
+        },
+      });
+      report.created += 1;
+    }
+
+    // 4. כתיבה לבסיס הנתונים באצוות
+    for (let i = 0; i < operations.length; i += 500) {
+      const batch = operations.slice(i, i + 500);
+      if (batch.length === 0) continue;
+      try {
+        // ordered: false -> שורה שנכשלת בולידציה של הסכימה מושמטת בשקט
+        // והשאר נכתבות. קוראים את השגיאות מהתוצאה כדי שלא ייעלמו מהדוח
+        const result = await Customer.bulkWrite(batch, { ordered: false });
+        const validationErrors = result?.mongoose?.validationErrors || [];
+        validationErrors.forEach((validationError) => {
+          report.created = Math.max(0, report.created - 1);
+          report.skipped += 1;
+          if (report.errors.length < 50) {
+            report.errors.push({
+              rowNumber: null,
+              customerNumber: "",
+              name: "",
+              message: validationError?.message || "השורה לא עברה ולידציה",
+            });
+          }
+        });
+      } catch (bulkErr) {
+        const writeErrors = bulkErr?.writeErrors || [];
+        writeErrors.forEach((writeError) => {
+          const failed = writeError?.err?.op || {};
+          if (failed.email) report.created = Math.max(0, report.created - 1);
+          else report.updated = Math.max(0, report.updated - 1);
+          report.skipped += 1;
+          if (report.errors.length < 50) {
+            report.errors.push({
+              rowNumber: null,
+              customerNumber: "",
+              name: toImportText(failed.name),
+              message: writeError?.errmsg || writeError?.err?.errmsg || "כתיבה נכשלה",
+            });
+          }
+        });
+        if (writeErrors.length === 0) throw bulkErr;
+      }
+    }
+
+    res.send({
+      ...report,
+      message: `יובאו ${report.created} לקוחות חדשים, עודכנו ${report.updated} לקוחות`,
+    });
+  } catch (err) {
+    console.log("importCustomers error: ", err);
+    res.status(500).send({ message: err.message });
   }
 };
 
@@ -360,7 +849,7 @@ const sendOtp = async (req, res) => {
     try {
       await sendSms(
         canonical,
-        `קוד ההתחברות שלך ל${process.env.COMPANY_NAME || "תמרים בתומר"}: ${code}`
+        `קוד ההתחברות שלך ל${process.env.COMPANY_NAME || "המתוקים של בני"}: ${code}`
       );
     } catch (smsErr) {
       // אם השליחה נכשלה - מוחקים את הקוד כדי לאפשר ניסיון חוזר מיידי
@@ -670,29 +1159,67 @@ const getCustomerById = async (req, res) => {
   }
 };
 
+// כרטיס לקוח מלא למסך "צפייה בלקוח" באדמין: כל שדות החנות יחד עם נתוני
+// ההנהח"ש מיבוא האקסל. erp מוגדר select:false במודל ולכן צריך לבקש אותו
+// במפורש - בלי זה המסך היה מציג רק שם, מייל וטלפון.
+// הסיסמה מוסרת: היא לא נחוצה בתצוגה ואין סיבה להוציא אותה מהשרת.
+const getCustomerDetails = async (req, res) => {
+  try {
+    const customer = await Customer.findById(req.params.id)
+      .select("+erp -password")
+      .lean();
+
+    if (!customer) {
+      return res.status(404).send({ message: "לקוח לא נמצא" });
+    }
+
+    res.send(customer);
+  } catch (err) {
+    console.log("getCustomerDetails error: ", err);
+    // מזהה שאינו ObjectId תקין מפיל את findById ב-CastError. בלי ההפרדה הזו
+    // הפאנל היה מציג שגיאת שרת פנימית עם נוסח של mongoose במקום "לקוח לא נמצא"
+    if (err?.name === "CastError") {
+      return res.status(404).send({ message: "לקוח לא נמצא" });
+    }
+    res.status(500).send({
+      message: err.message,
+    });
+  }
+};
+
 const updateCustomer = async (req, res) => {
   try {
     const customer = await Customer.findById(req.params.id);
     if (customer) {
-      if (req?.user?.email !== customer.email && req?.user?.role !== "Admin" && req?.user?.role !== "CEO") {
+      if (!(await canManageCustomer(req?.user, customer))) {
         return res.status(403).send({
           message: "You are not authorized to update this customer!",
         });
       }
-      customer.name = req.body.name;
-      customer.lastName = req.body.lastName;
-      customer.email = req.body.email;
-      customer.address = req.body.address;
+      // נקבע לפי האימייל שלפני העדכון, אחרת לקוח שמשנה את האימייל של עצמו
+      // היה נחשב בטעות לאיש צוות שעורך לקוח אחר ולא היה מקבל טוקן מעודכן
+      const isSelfUpdate = req?.user?.email === customer.email;
+
+      // מעדכנים רק שדות שנשלחו בפועל. טופס עריכת הלקוח בפאנל שולח שם/אימייל/טלפון
+      // בלבד, ולכן השמה עיוורת של כל השדות הייתה מוחקת ללקוח את הכתובת והתמונה
+      if (req.body.name !== undefined) customer.name = req.body.name;
+      if (req.body.lastName !== undefined) customer.lastName = req.body.lastName;
+      if (req.body.email !== undefined) customer.email = req.body.email;
+      if (req.body.address !== undefined) customer.address = req.body.address;
       // נרמול נייד ישראלי לפורמט 05XXXXXXXX. בלי זה מספר שנשמר עם מקפים או רווחים
       // אינו נמצא בכניסה בטלפון, והלקוח נתקע: הכניסה אומרת שאין חשבון וההרשמה
       // אומרת שהאימייל כבר רשום. כל פורמט אחר נשמר כפי שהוא
-      customer.phone = isValidIsraeliMobile(req.body.phone)
-        ? canonicalPhone(req.body.phone)
-        : req.body.phone;
-      customer.image = req.body.image;
+      if (req.body.phone !== undefined) {
+        customer.phone = isValidIsraeliMobile(req.body.phone)
+          ? canonicalPhone(req.body.phone)
+          : req.body.phone;
+      }
+      if (req.body.image !== undefined) customer.image = req.body.image;
       // customer.password = bcrypt.hashSync("12345678");
       const updatedUser = await customer.save();
-      const token = signInToken(updatedUser);
+      // הטוקן נועד לרענן את החיבור של הלקוח בחנות אחרי עדכון הפרופיל. איש צוות
+      // שעורך לקוח אחר אינו זקוק לו, ואין סיבה להנפיק לו טוקן התחברות של הלקוח
+      const token = isSelfUpdate ? signInToken(updatedUser) : undefined;
       res.send({
         token,
         _id: updatedUser._id,
@@ -707,11 +1234,21 @@ const updateCustomer = async (req, res) => {
         welcomeGift: updatedUser.welcomeGift,
         message: "Customer Updated Successfully!",
       });
+    } else {
+      // בלי זה בקשה למזהה שלא קיים לא מקבלת תשובה כלל, והפאנל נתקע בטעינה
+      res.status(404).send({ message: "לקוח לא נמצא" });
     }
   } catch (err) {
     console.log('updateCustomer error: ', err);
-    res.status(404).send({
-      message: "Your email is not valid!",
+    // האימייל ייחודי במודל, ולכן שיוך אימייל שכבר תפוס נכשל כאן. בלי ההפרדה
+    // הזו הפאנל הציג "Your email is not valid!" ולא ניתן היה להבין מה נכשל
+    if (err?.code === 11000) {
+      return res.status(409).send({
+        message: "כתובת האימייל הזו כבר משויכת ללקוח אחר במערכת.",
+      });
+    }
+    res.status(400).send({
+      message: "עדכון פרטי הלקוח נכשל. יש לוודא שהפרטים תקינים ולנסות שוב.",
     });
   }
 };
@@ -719,12 +1256,14 @@ const updateCustomer = async (req, res) => {
 const deleteCustomer = async (req, res) => {
   try {
     const customer = await Customer.findById(req.params.id);
-    if (customer) {
-      if (req?.user?.email !== customer.email && req?.user?.role !== "Admin" && req?.user?.role !== "CEO") {
-        return res.status(403).send({
-          message: "You are not authorized to delete this customer!",
-        });
-      }
+    // בלי הבדיקה הזו מזהה שאינו קיים דילג על בדיקת ההרשאות והחזיר "נמחק בהצלחה"
+    if (!customer) {
+      return res.status(404).send({ message: "לקוח לא נמצא" });
+    }
+    if (!(await canManageCustomer(req?.user, customer))) {
+      return res.status(403).send({
+        message: "You are not authorized to delete this customer!",
+      });
     }
 
     await Customer.deleteOne({ _id: req.params.id });
@@ -1012,7 +1551,8 @@ module.exports = {
   sendOtp,
   verifyOtp,
   registerCustomer,
-  addAllCustomers,
+  importCustomers,
+  checkImportCustomers,
   signUpWithProvider,
   verifyEmailAddress,
   forgetPassword,
@@ -1020,6 +1560,7 @@ module.exports = {
   resetPassword,
   getAllCustomers,
   getCustomerById,
+  getCustomerDetails,
   getShippingRewardEligibility,
   updateCustomer,
   deleteCustomer,

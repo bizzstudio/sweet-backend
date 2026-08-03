@@ -17,6 +17,7 @@ const timezone = require("dayjs/plugin/timezone");
 const { sendEmail, sendOrderNotificationEmail } = require('../lib/email-sender/sender');
 const { whatsappErrorEmailBody } = require('../lib/email-sender/templates/whatsapp-error');
 const { handleProductQuantity } = require('../lib/stock-controller/others');
+const { getIngestionErrorStatusId } = require('../utils/ingestionStatus');
 const Offer = require("../models/Offer");
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -408,15 +409,21 @@ const getCompletedOrders = async (req, res) => {
     const deliveredStatus = await Status.findOne({ name: "Delivered" });
     const likutStatus = await Status.findOne({ name: "Likut" });
 
+    // הזמנה שנקלטה מהמייל/ווצאפ ולא נקראה במלואה יושבת ב"שגיאה בקריאה" ועדיין
+    // לא אושרה ע"י אדם. השאילתה כאן היא $nin, ולכן בלי החרגה מפורשת הזמנה כזו
+    // הייתה נחשבת "הושלמה" ומופיעה למלקטים.
+    const ingestionErrorStatusId = await getIngestionErrorStatusId();
+
     const statusIds = [
       cancelStatus._id,
       pendingStatus._id,
       processingStatus._id,
       deliveredStatus._id,
-      likutStatus._id
+      likutStatus._id,
+      ...(ingestionErrorStatusId ? [ingestionErrorStatusId] : []),
     ];
 
-    // שאילתה של ההזמנות שלא כוללות את אחד מחמשת הסטטוסים הרשמיים
+    // שאילתה של ההזמנות שלא כוללות את אחד מהסטטוסים הרשמיים
     const totalDoc = await Order.countDocuments({ status: { $nin: statusIds } });
     const orders = await Order.find({ status: { $nin: statusIds } })
       .populate({ path: "status" })
