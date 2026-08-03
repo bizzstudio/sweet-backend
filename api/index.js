@@ -75,7 +75,7 @@ app.use(cors());
 
 //root route
 app.get("/", (req, res) => {
-  res.send("tomer-backend works properly! #6");
+  res.send("sweet-backend works properly!");
 });
 
 // Route for uploading images to S3
