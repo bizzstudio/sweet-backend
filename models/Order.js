@@ -1,6 +1,5 @@
 // models/Order.js
 const mongoose = require("mongoose");
-// const AutoIncrement = require("mongoose-sequence")(mongoose); // הסר שורה זו
 
 const CitySchema = new mongoose.Schema({
   _id: {
@@ -55,6 +54,12 @@ const orderSchema = new mongoose.Schema(
     invoice: {
       type: Number,
       required: false,
+      // אינדקס ייחודי: רשת הביטחון האחרונה מפני שתי הזמנות עם אותו מספר.
+      // ההקצאה עצמה נעשית במונה אטומי (utils/invoiceNumber), והאינדקס דואג
+      // שאם בכל זאת תיווצר התנגשות — מונגו יסרב, במקום לשמור בשקט כפילות.
+      // sparse כי השדה אינו חובה: הזמנות בלי invoice אינן נכנסות לאינדקס.
+      unique: true,
+      sparse: true,
     },
     cart: [{}],
     user_info: {
@@ -167,6 +172,14 @@ const orderSchema = new mongoose.Schema(
       type: String,
       required: false,
     },
+    // הערת מערכת — מה שהמנוע יודע על ההזמנה ולא מה שהלקוח כתב: סימון מקור
+    // הקליטה, אזהרות (כתובת חסרה), והנחות שהמנוע לקח (יחידות, כמות משוערת).
+    // בכוונה שדה נפרד מ-customer_note: זה האחרון מצוטט ללקוח במייל האישור
+    // ובהערות החשבונית, ומידע פנימי אסור שידלוף לשם.
+    systemNote: {
+      type: String,
+      required: false,
+    },
     actualMelaket: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Status", // נניח שהמלקט הוא חלק מהסכמה Status
@@ -271,11 +284,9 @@ const orderSchema = new mongoose.Schema(
   }
 );
 
-// הסר את הפלגין AutoIncrement:
-// orderSchema.plugin(AutoIncrement, {
-//   inc_field: "invoice",
-//   start_seq: 10000,
-// });
+// מספר ההזמנה אינו מוקצה כאן ואינו דרך פלאגין AutoIncrement, אלא במונה אטומי
+// משותף — utils/invoiceNumber.nextFreeInvoice(). הסיבה: המספר נדרש בקוד היצירה
+// עצמו (מייל התראה, לוגים, תשובה ללקוח) ומכמה מסלולים שונים, ולא רק ב-hook של save.
 
 // 2) Hooks לחישוב בונוס
 // pre-save
@@ -351,5 +362,19 @@ orderSchema.pre("updateOne", async function (next) {
 
 // 3) יוצרים את המודל
 const Order = mongoose.model("Order", orderSchema);
+
+// בניית האינדקסים נעשית ברקע בעליית השרת, וכשלון בה אינו מפיל את התהליך —
+// כלומר השרת היה ממשיך לרוץ בלי האינדקס הייחודי, בשקט. אם האינדקס על invoice
+// לא נבנה (בדרך כלל: כפילויות שכבר קיימות בנתונים) חייבים לדעת על זה.
+Order.on("index", (err) => {
+  if (!err) return;
+  console.error(
+    `[Order] בניית אינדקס נכשלה: ${err.message}\n` +
+      `        אם מדובר ב-invoice — יש כפילויות בנתונים. לאיתור:\n` +
+      `        db.orders.aggregate([{$group:{_id:"$invoice",n:{$sum:1}}},{$match:{n:{$gt:1}}}])\n` +
+      `        המערכת ממשיכה לעבוד (המונה ב-utils/invoiceNumber הוא ההגנה העיקרית),\n` +
+      `        אבל רשת הביטחון האחרונה מפני מספר כפול חסרה.`
+  );
+});
 
 module.exports = Order;

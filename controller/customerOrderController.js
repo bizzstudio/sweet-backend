@@ -9,6 +9,7 @@ const Coupon = require("../models/Coupon");
 const Setting = require("../models/Setting");
 const dayjs = require("dayjs");
 const logStatusChange = require("../utils/logStatusChange");
+const { nextFreeInvoice } = require("../utils/invoiceNumber");
 const Customer = require("../models/Customer");
 const { findOptimalOfferCombination } = require("../utils/offerCalculations");
 const { findServerItemForClientLine } = require("../utils/cartOfferSync");
@@ -21,6 +22,14 @@ const {
 
 const ADD_ORDER_ERROR_ALERT_EMAIL =
   process.env.ADD_ORDER_ERROR_ALERT_EMAIL || "office@bizzstudio.co.il";
+
+// שדות פנימיים של קליטת ההזמנות שאינם יוצאים בתגובה ללקוח. הנתיבים כאן מחזירים
+// את מסמך ההזמנה כמו שהוא, כולל בגישת אורח עם טוקן, ולכן מה שלא מסונן כאן נשלח
+// לדפדפן של הלקוח גם אם החנות לא מציגה אותו.
+//   systemNote    — הערת המערכת (מקור הקליטה, אזהרת כתובת חסרה, הנחות המנוע).
+//   ingestionError — פירוט הכשל: הודעת השגיאה לעובד, פריטים שלא זוהו וסיבותיהם.
+// שניהם מיועדים לצוות בדשבורד. אף מסך בחנות אינו קורא אותם.
+const CUSTOMER_HIDDEN_FIELDS = "-systemNote -ingestionError";
 
 const addOrder = async (req, res) => {
   try {
@@ -487,9 +496,10 @@ const addOrder = async (req, res) => {
     // שלב 12: יצירת ההזמנה החדשה
     console.log("creating new order...", status._id, req.user._id);
 
-    // נוסיף חישוב invoice ידני
-    const lastOrder = await Order.findOne().sort({ invoice: -1 }).select('invoice');
-    const nextInvoice = (lastOrder && lastOrder.invoice) ? lastOrder.invoice + 1 : 10000;
+    // מספר ההזמנה מוקצה במונה אטומי (utils/invoiceNumber) ולא כ-"המקסימום + 1":
+    // חישוב לפי המקסימום החזיר מספר של הזמנה שנמחקה, ושתי הזמנות מקבילות היו
+    // מקבלות את אותו מספר.
+    const nextInvoice = await nextFreeInvoice();
 
     // המרת cart items ל-plain objects כדי להבטיח שכל השדות (כולל מוצרי פרס) יישמרו נכון ב-DB
     const cartForSave = itemsWithOffers.map(item => {
@@ -799,6 +809,7 @@ const getOrderCustomer = async (req, res) => {
     const orders = await Order.find({
       user: req.user._id,
     })
+      .select(CUSTOMER_HIDDEN_FIELDS)
       .populate({ path: 'status' })
       .sort({ _id: -1 })
       .skip(skip)
@@ -835,13 +846,17 @@ const getOrderById = async (req, res) => {
       }
       
       // חיפוש ההזמנה לפי ID בלבד (ללא בדיקת user)
-      order = await Order.findById(req.params.id).populate({ path: "status" });
+      order = await Order.findById(req.params.id)
+        .select(CUSTOMER_HIDDEN_FIELDS)
+        .populate({ path: "status" });
     } else if (req.user && req.user._id) {
       // משתמש מחובר - בדיקה רגילה
       order = await Order.findOne({
         _id: req.params.id,
         user: req.user._id
-      }).populate({ path: "status" });
+      })
+        .select(CUSTOMER_HIDDEN_FIELDS)
+        .populate({ path: "status" });
     } else {
       // אין טוקן ואין משתמש מחובר
       return res.status(401).send({

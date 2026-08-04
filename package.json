@@ -18,13 +18,16 @@
     "docx:test": "node script/test-docx.js",
     "gmail:token": "node script/get-gmail-token.js",
     "ingest:test": "node script/test-ingestion.js",
+    "ingest:reclassify": "node script/reclassify-conversations.js",
+    "ingest:filter-test": "node script/test-conversation-filter.js",
     "import:preflight": "node script/import-preflight.js",
     "stock:set": "node script/set-stock.js",
     "prices:set": "node script/set-prices.js",
     "mail:diag": "node script/diagnose-mail.js",
     "products:dedupe": "node script/dedupe-products.js",
     "pdf:check": "node script/check-pdfs.js",
-    "notes:clean": "node script/clean-ingestion-notes.js"
+    "notes:clean": "node script/clean-ingestion-notes.js",
+    "notes:split": "node script/split-system-notes.js"
   },
   "author": "המתוקים של בני",
   "license": "ISC",
