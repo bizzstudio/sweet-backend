@@ -165,9 +165,32 @@ const isWhatsappServer = async (req, res, next) => {
       }
     }
 
-    // אם לא אדמין, בדיקה של ה-API key
+    // אם לא אדמין, בדיקה של ה-API key של שרת הווצאפ שלנו (sweet-whatsapp).
+    //
+    // זהו הכיוון ה**נכנס** בלבד. הכיוון היוצא — הקריאות מהבקאנד לשרת של קירשנר
+    // ב-orderController ו-messageController — משתמש ב-KIRSHNER_WHATSAPP_API_KEY,
+    // שהוא סוד של שרת אחר. שני הכיוונים חלקו בעבר מפתח אחד, מה שאילץ את שני
+    // השרתים להחזיק את אותו סוד.
+    //
+    // המידלוור הזה שומר על 8 נקודות קצה, לא רק על ה-webhook של הקליטה: תבניות
+    // ההודעות, הסקר, ורשימת החסומים. אם שרת חיצוני כלשהו עדיין קורא להן עם
+    // המפתח הישן, KIRSHNER_WHATSAPP_API_KEY ממשיך להתקבל — **רק אם הוא מוגדר
+    // במפורש**. מחיקתו מ-.env מבטלת את המסלול הישן לגמרי.
     const apiKey = req.headers["x-api-key"];
-    if (!apiKey || apiKey !== process.env.KIRSHNER_WHATSAPP_API_KEY) {
+    const legacyKey = process.env.KIRSHNER_WHATSAPP_API_KEY;
+
+    const accepted =
+      (apiKey && apiKey === process.env.SWEET_WHATSAPP_API_KEY) ||
+      (apiKey && legacyKey && apiKey === legacyKey);
+
+    if (apiKey && legacyKey && apiKey === legacyKey) {
+      console.warn(
+        "[isWhatsappServer] התקבל המפתח הישן KIRSHNER_WHATSAPP_API_KEY. " +
+          "יש להעביר את הקורא ל-SWEET_WHATSAPP_API_KEY ולמחוק את הישן."
+      );
+    }
+
+    if (!accepted) {
       return res.status(403).send({
         success: false,
         message: "Unauthorized: Invalid WhatsApp API key",

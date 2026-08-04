@@ -458,89 +458,32 @@ npm run docx:test -- ./exemple           # כל ה-docx בתיקייה
 בתיבה עמוסה כדאי לצמצם: כלל ב-Gmail שמסמן הזמנות בתווית ייעודית, ואז
 `IMAP_MAILBOX=<שם התווית>`. כך נסרקות רק הודעות שכבר סוננו.
 
-### 3. ווצאפ — שינוי נדרש בשרת הווצאפ
+### 3. ווצאפ — שרת `sweet-whatsapp`
 
-ההודעות הנכנסות מווצאפ מגיעות לשרת `kirshner-whatsapp`, שהוא פרויקט **נפרד
-ומשותף גם לחנות אחרת**. הצד של הבקאנד כאן מוכן ומחכה; מה שנשאר הוא שהשרת
-ההוא יעביר הודעות פרטיות נכנסות שאינן תשובות סקר.
+ההודעות הנכנסות מגיעות מ-**`sweet-whatsapp`**, פרויקט אחות בתיקייה
+`../sweet-whatsapp`. הוא מחזיק את החיבור (Baileys), מציג QR לסריקה בדשבורד,
+ומעביר לכאן כל הודעה פרטית נכנסת. הוראות ההתקנה וההפעלה ב-`sweet-whatsapp/README.md`.
 
-ב-`kirshner-whatsapp/index.js`, בתוך המאזין `sock.ev.on("messages.upsert", ...)`
-(סביבות שורה 236), אחרי הקריאה ל-`surveyHandler.handleIncomingMessage`:
-
-```js
-// אם ההודעה לא נבלעה ע"י מנגנון הסקרים — היא עשויה להיות הזמנה
-const handled = await surveyHandler.handleIncomingMessage(userPhone, userReply, {
-    sendReply: (text) => sock.sendMessage(message.key.remoteJid, { text }),
-});
-
-if (!handled && process.env.SWEETS_ORDERS_WEBHOOK_URL) {
-    // קובץ מצורף (אקסל, PDF או וורד) — מורידים אותו ושולחים כ-base64.
-    // הזמנה עסקית מגיעה בווצאפ כקובץ בדיוק כמו במייל, ולכן זה לא מקרה קצה.
-    const doc =
-        message.message?.documentMessage ||
-        message.message?.documentWithCaptionMessage?.message?.documentMessage;
-
-    const attachments = [];
-
-    if (doc) {
-        try {
-            const buffer = await downloadMediaMessage(message, "buffer", {}, {
-                logger,
-                reuploadRequest: sock.updateMediaMessage,
-            });
-            attachments.push({
-                filename: doc.fileName || "attachment",
-                mimeType: doc.mimetype,
-                data: buffer.toString("base64"),
-            });
-        } catch (err) {
-            console.error("media download failed:", err.message);
-        }
-    }
-
-    axios.post(
-        process.env.SWEETS_ORDERS_WEBHOOK_URL,
-        {
-            messageId: message.key.id,
-            phone: userPhone,
-            name: message.pushName,
-            text: body,                                  // הטקסט המקורי, לא userReply
-            timestamp: Number(message.messageTimestamp),
-            attachments,                                 // ריק כשאין קובץ
-        },
-        { headers: { "x-api-key": process.env.SWEETS_ORDERS_API_KEY }, maxBodyLength: Infinity }
-    ).catch((err) => console.error("sweets order webhook failed:", err.message));
-}
-```
-
-‏`downloadMediaMessage` מיובא מ-`@whiskeysockets/baileys` (או מהחבילה המקבילה
-שהשרת משתמש בה).
-
-ובקובץ ה-`.env` של שרת הווצאפ:
+ב-`.env` של הבקאנד נדרש מפתח אחד:
 
 ```bash
-SWEETS_ORDERS_WEBHOOK_URL=https://<כתובת הבקאנד>/api/incoming-orders/whatsapp
-SWEETS_ORDERS_API_KEY=<אותו ערך כמו KIRSHNER_WHATSAPP_API_KEY בבקאנד>
+SWEET_WHATSAPP_API_KEY=<אותו ערך כמו ב-sweet-whatsapp/.env>
 ```
 
-ארבע נקודות לתשומת לב:
+> ⚠️ **לא להתבלבל עם `KIRSHNER_WHATSAPP_API_KEY`.** הוא נשאר בשימוש, אבל בכיוון
+> ההפוך: קריאות **יוצאות** מהבקאנד לשרת של קירשנר —
+> `/send-abandoned-order-notice` ב-`orderController` ו-`/refresh-templates`
+> ב-`messageController`, יחד עם `KIRSHNER_WHATSAPP_URL`. זה שרת אחר וסוד אחר.
 
-- שולחים את `body` ולא את `userReply` — `userReply` עבר `toLowerCase()` לצורך
-  התאמת תשובות הסקר.
-- `handleIncomingMessage` צריך להחזיר ערך שמעיד אם ההודעה נבלעה ע"י הסקר.
-  אם הוא לא מחזיר כלום כרגע, צריך להוסיף לו `return true/false` — אחרת כל תשובת
-  סקר תישלח גם לניתוח כהזמנה (היא תסומן `not_an_order`, אבל זה בזבוז קריאות
-  ל-OpenAI).
-- **הודעה שכולה קובץ, בלי טקסט, היא מקרה תקין** — `text` אינו חובה כשיש
-  `attachments`. אל תסנן הודעות בלי `body`.
-- `maxBodyLength: Infinity` ב-axios: בלעדיו axios חותך גוף מעל 10MB בעצמו,
-  עוד לפני שהבקשה יוצאת.
+עד גרסה קודמת של המסמך הזה הקליטה תוכננה לרוץ דרך `kirshner-whatsapp`, שהוא
+שרת המשותף לחנות אחרת. זה הוחלף בשרת עצמאי כדי שמספר הווצאפ של החנות, הסשן
+והשינויים בקוד לא ישותפו עם חנות אחרת.
 
 ### מבנה הבקשה
 
 ```jsonc
 POST /api/incoming-orders/whatsapp
-x-api-key: <KIRSHNER_WHATSAPP_API_KEY>
+x-api-key: <SWEET_WHATSAPP_API_KEY>
 
 {
   "messageId": "3EB0...",           // חובה — מונע קליטה כפולה
