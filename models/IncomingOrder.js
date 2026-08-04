@@ -88,11 +88,38 @@ const incomingOrderSchema = new mongoose.Schema(
     attachments: { type: Array, required: false, default: [] },
     receivedAt: { type: Date, required: false, default: Date.now },
 
+    // ── צבירת הודעות המשך ──
+    //
+    // הודעות נוספות מאותו שולח מצטרפות לרשומה הזו במקום ליצור רשומה חדשה.
+    // ‏rawText מחזיק את כולן משורשרות — זה מה שהפרסר קורא בסוף.
+    messages: {
+      type: [
+        {
+          externalId: { type: String },  // מזהה ההודעה במקור — מונע צירוף כפול
+          text: { type: String },
+          receivedAt: { type: Date },
+          _id: false,
+        },
+      ],
+      required: false,
+      default: undefined,
+    },
+    // מתי מותר להתחיל לעבד. כל הודעה חדשה דוחה אותו קדימה, כלומר הספירה היא
+    // של *שקט* מהשולח ולא של זמן מההודעה הראשונה.
+    processAfter: { type: Date, required: false },
+    lastMessageAt: { type: Date, required: false },
+
     // ── תוצאת העיבוד ──
     status: {
       type: String,
       required: true,
       enum: [
+        // ── ממתינה להודעות המשך (ווצאפ בלבד) ──
+        //
+        // לקוח בווצאפ מפצל הזמנה לכמה הודעות ("היי" / "3 מגבות נייר" / "מתקן
+        // סבון"), וכל הודעה שנקראה בנפרד ייצרה הזמנה נפרדת. בסטטוס הזה ההודעות
+        // נצברות לרשומה אחת, והעיבוד מתחיל רק אחרי חלון של שקט מהשולח.
+        "collecting",
         "received",       // נקלטה, עוד לא עובדה
         "order_created",  // הפכה להזמנה בהצלחה
         "failed",         // העיבוד נכשל — דורש טיפול אנושי
@@ -169,6 +196,28 @@ const incomingOrderSchema = new mongoose.Schema(
 incomingOrderSchema.index({ status: 1, createdAt: -1 });
 incomingOrderSchema.index({ channel: 1, createdAt: -1 });
 incomingOrderSchema.index({ "sender.phone": 1 });
+// שליפת הרשומות שחלון השקט שלהן נגמר — רצה כל דקה, חייבת להיות זולה
+incomingOrderSchema.index({ status: 1, processAfter: 1 });
+// מניעת צירוף כפול של אותה הודעה לרשומה פתוחה
+incomingOrderSchema.index({ "messages.externalId": 1 });
+
+// ── רשומת צבירה אחת בלבד לכל מספר ──
+//
+// ה-webhook עונה מיד וממשיך לעבד ברקע, ולכן שתי הודעות שנשלחו ברצף מעובדות
+// במקביל. בלי האינדקס הזה שתיהן מצאו "אין רשומה פתוחה" ויצרו אחת כל אחת —
+// כלומר בדיוק הפיצול לשתי הזמנות שהצבירה נועדה למנוע. נמדד: 5 הודעות
+// במקביל ייצרו 3 רשומות.
+//
+// המסנן החלקי הוא מה שמאפשר את זה: הייחודיות חלה **רק** על רשומות שממתינות,
+// ולכן לאותו מספר יכולות להיות אינספור רשומות שכבר עובדו, כמו תמיד.
+//
+// המפתח הוא (טלפון, סטטוס) ולא טלפון בלבד, כי על "sender.phone" לבדו כבר יש
+// אינדקס — ומונגו דוחה שני אינדקסים באותו מפתח (IndexKeySpecsConflict).
+// אותו אינדקס משרת גם את שאילתת הצירוף, שמחפשת בדיוק לפי שני השדות האלה.
+incomingOrderSchema.index(
+  { "sender.phone": 1, status: 1 },
+  { unique: true, partialFilterExpression: { status: "collecting" } }
+);
 
 const IncomingOrder = mongoose.model("IncomingOrder", incomingOrderSchema);
 

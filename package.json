@@ -23,7 +23,8 @@
     "prices:set": "node script/set-prices.js",
     "mail:diag": "node script/diagnose-mail.js",
     "products:dedupe": "node script/dedupe-products.js",
-    "pdf:check": "node script/check-pdfs.js"
+    "pdf:check": "node script/check-pdfs.js",
+    "notes:clean": "node script/clean-ingestion-notes.js"
   },
   "author": "המתוקים של בני",
   "license": "ISC",

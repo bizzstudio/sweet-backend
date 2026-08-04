@@ -8,6 +8,7 @@ const {
   getAllIncomingOrders,
   getIncomingOrderById,
   retryIncomingOrder,
+  processCollectedNow,
   ignoreIncomingOrder,
   approveErrorOrder,
   retryFromOrder,
@@ -90,6 +91,9 @@ router.get("/", isAdmin, getAllIncomingOrders);
 
 // הרצה חוזרת של הודעה שנכשלה
 router.post("/:id/retry", isAdmin, retryIncomingOrder);
+
+// עיבוד עכשיו של הודעה שממתינה להודעות המשך, בלי להמתין לסוף חלון השקט
+router.post("/:id/process-now", isAdmin, processCollectedNow);
 
 // סימון הודעה כלא רלוונטית
 router.put("/:id/ignore", isAdmin, ignoreIncomingOrder);

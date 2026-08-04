@@ -15,7 +15,13 @@ const Status = require("../models/Status");
 const logStatusChange = require("../utils/logStatusChange");
 const { handleProductQuantity } = require("../lib/stock-controller/others");
 const { sendOrderNotificationEmail } = require("../lib/email-sender/sender");
-const { ingestMessage, reprocess, isAlreadyIngested } = require("../lib/order-ingestion");
+const {
+  ingestMessage,
+  reprocess,
+  isAlreadyIngested,
+  releaseCollectedMessages,
+  COLLECT_WINDOW_MS,
+} = require("../lib/order-ingestion");
 const { checkStock } = require("../lib/order-ingestion/createOrder");
 const { pollOnce, isMailConfigured, getActiveChannel } = require("../lib/mail-reader");
 const { getIngestionErrorStatusId } = require("../utils/ingestionStatus");
@@ -277,10 +283,14 @@ const receiveWhatsappMessage = async (req, res) => {
 const STUCK_IN_PROCESSING_MS = 10 * 60 * 1000;
 
 // הגדרה אחת, לספירה ולרשימה כאחד — אחרת התג היה אומר 1 והרשימה מציגה 12.
+// המדד הוא updatedAt ולא createdAt: הודעת ווצאפ שנצברה נוצרת בתחילת חלון
+// השקט ומתחילה להתעבד רבע שעה אחריה, ולכן לפי createdAt היא הייתה נספרת
+// כ"תקועה" כבר ברגע שהעיבוד שלה מתחיל. updatedAt מסמן מתי היא באמת נכנסה
+// לעיבוד. בהודעה שמעובדת מיד שני השדות זהים, ולכן ההתנהגות שם לא משתנה.
 const stuckInProcessingFilter = () => ({
   status: "received",
   channel: { $ne: "manual" },
-  createdAt: { $lt: new Date(Date.now() - STUCK_IN_PROCESSING_MS) },
+  updatedAt: { $lt: new Date(Date.now() - STUCK_IN_PROCESSING_MS) },
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -362,6 +372,9 @@ const getAllIncomingOrders = async (req, res) => {
       limits,
       countByStatus,
       stuckCount,
+      // הדשבורד מסביר למשתמש כמה זמן הודעה ממתינה. הערך מגיע מהשרת ולא נכתב
+      // בקוד המסך, אחרת שינוי ההגדרה היה משאיר הסבר שגוי על המסך.
+      collectWindowMinutes: COLLECT_WINDOW_MS() / 60000,
     });
   } catch (err) {
     console.log("getAllIncomingOrders error: ", err);
@@ -874,8 +887,75 @@ if (pollingEnabled) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────
+//  שחרור הודעות ווצאפ שנצברו
+// ─────────────────────────────────────────────────────────────
+//
+// רץ כל דקה: שאילתה אחת על אינדקס (status + processAfter), ולרוב בלי תוצאות.
+// דקה היא גם רזולוציית הדיוק — הזמנה תעובד עד דקה אחרי תום חלון השקט.
+//
+// אין תלות בשרת הווצאפ: הרשומות שמורות במסד, ולכן נפילה או פריסה מחדש באמצע
+// החלון אינה מאבדת הזמנה — הסבב הבא אחרי העלייה יאסוף אותה.
+if (COLLECT_WINDOW_MS() > 0) {
+  cron.schedule("* * * * *", async () => {
+    try {
+      const released = await releaseCollectedMessages();
+      if (released.length) {
+        console.log(`[whatsapp-collect] שוחררו ${released.length} הודעות לעיבוד`);
+      }
+    } catch (err) {
+      console.error(`[whatsapp-collect] כשל בשחרור הודעות שנצברו: ${err.message}`);
+    }
+  });
+  console.log(
+    `[whatsapp-collect] הודעות ווצאפ נצברות ומעובדות אחרי ${
+      COLLECT_WINDOW_MS() / 60000
+    } דקות של שקט מהשולח`
+  );
+} else {
+  console.log("[whatsapp-collect] צבירת הודעות כבויה — כל הודעה מעובדת מיד");
+}
+
+/**
+ * POST /api/incoming-orders/:id/process-now
+ *
+ * עיבוד רשומה שממתינה, בלי להמתין לסוף חלון השקט. נדרש כי החלון ארוך: מי
+ * שרואה את ההזמנה במסך ויודע שהלקוח סיים לא צריך לחכות לו.
+ */
+const processCollectedNow = async (req, res) => {
+  try {
+    const doc = await IncomingOrder.findById(req.params.id).select("status");
+    if (!doc) {
+      return res.status(404).send({ message: "ההודעה לא נמצאה" });
+    }
+    if (doc.status !== "collecting") {
+      return res.status(400).send({
+        message: "ההודעה כבר עובדה — אינה ממתינה להודעות המשך",
+      });
+    }
+
+    const [processed] = await releaseCollectedMessages({ id: req.params.id });
+    if (!processed) {
+      // מרוץ מול ה-cron: הוא תפס את הרשומה בדיוק עכשיו
+      return res.send({ message: "ההודעה כבר נתפסה לעיבוד" });
+    }
+
+    res.send({
+      message:
+        processed.status === "order_created"
+          ? `נוצרה הזמנה ${processed.invoice}`
+          : "ההודעה עובדה",
+      incomingOrder: processed,
+    });
+  } catch (err) {
+    console.log("processCollectedNow error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
 module.exports = {
   receiveWhatsappMessage,
+  processCollectedNow,
   getAllIncomingOrders,
   getIncomingOrderById,
   retryIncomingOrder,
