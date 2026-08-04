@@ -29,6 +29,9 @@ const matchedItemSchema = new mongoose.Schema(
     rawName: { type: String, required: false },
     // הכמות שנקבעה בסוף (מה-LLM או מהטקסט)
     quantity: { type: Number, required: false, default: 1 },
+    // הלקוח לא כתב כמות והונח 1. מוצג בדשבורד, כי זו הנחה של המערכת ולא
+    // משהו שהלקוח ביקש — ומי שמאשר את ההזמנה צריך לדעת שזה מה שהונח.
+    quantityAssumed: { type: Boolean, required: false, default: false },
     // יחידת מדידה שהלקוח ציין, אם ציין (ק"ג / שקית / מארז ...)
     unit: { type: String, required: false },
     // הערה לפריט ("בלי גרעינים", "טרי")

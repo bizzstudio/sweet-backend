@@ -83,7 +83,10 @@ const run = async () => {
       row.method = parsed.method;
       row.extracted = (parsed.items || []).length;
 
-      // שורות שנראות כפריט אך לא נקלטו — הסימן לפריט שאבד בשקט
+      // שורות שנקראו כפריט בלי שהלקוח כתב כמות — נלקחה יחידה אחת.
+      // אלה השורות שדורשות עין אנושית: ההנחה יכולה להיות שגויה.
+      row.assumed = (parsed.items || []).filter((i) => i.quantityAssumed);
+      // שורות שנראות כפריט ובכל זאת לא נקלטו (למשל מעל התקרה)
       row.suspect = (parsed.skippedRows || []).filter((s) => s.suspectedItem);
 
       if (!parsed.isOrder) {
@@ -125,6 +128,13 @@ const run = async () => {
   if (suspects.length) {
     console.log(`\n⚠ שורות שנראות כפריט אך לא נקלטו (${suspects.length}):`);
     suspects.forEach(({ file, s }) => console.log(`   [${file}] ${s.raw}`));
+  }
+
+  const assumed = results.flatMap((r) => (r.assumed || []).map((i) => ({ file: r.name, i })));
+  if (assumed.length) {
+    console.log(`
+שורות בלי כמות שנקראו כיחידה אחת (${assumed.length}):`);
+    assumed.forEach(({ file, i }) => console.log(`   [${file}] ${i.rawName}`));
   }
 
   const fails = results.flatMap((r) => (r.fails || []).map((f) => ({ file: r.name, f })));
