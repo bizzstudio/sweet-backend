@@ -120,11 +120,24 @@ const isApp = async (req, res, next) => {
 };
 
 const loginApp = async (req, res) => {
-  const { phone, password } = req.body;
+  const { username, phone, password } = req.body;
   try {
-    const melaket = await Status.findOne({ phone, password });
+    // מלקטים חדשים מתחברים בשם משתמש, ותיקים עדיין לפי טלפון — לכן שני
+    // השדות מתקבלים והאפליקציה שולחת את מה שהוקלד בשדה היחיד שלה.
+    const identifier = String(username ?? phone ?? "").trim();
+
+    // בלי החסימה הזו מזהה ריק היה מותאם לסטטוסי ההזמנה, שנזרעים עם
+    // phone: "" ויושבים באותו collection.
+    if (!identifier || !password) {
+      return res.status(401).send("שם משתמש או סיסמה שגויים");
+    }
+
+    const melaket = await Status.findOne({
+      password,
+      $or: [{ username: identifier }, { phone: identifier }],
+    });
     if (!melaket) {
-      return res.status(401).send("טלפון או סיסמה שגויים");
+      return res.status(401).send("שם משתמש או סיסמה שגויים");
     }
 
     if (!melaket.isActive) {
@@ -138,6 +151,7 @@ const loginApp = async (req, res) => {
         isActive: melaket.isActive,
         name: melaket.name,
         heName: melaket.heName,
+        username: melaket.username,
         phone: melaket.phone,
         color: melaket.color,
       },
