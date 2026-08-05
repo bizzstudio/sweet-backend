@@ -1,5 +1,26 @@
 const Status = require("../models/Status");
 
+// שמות הסטטוסים שהמערכת מחפשת לפי name: הזמנה חדשה נפתחת ב-
+// Status.findOne({ name: "Pending" }), הקליטה מעבירה ל-"Processing",
+// והדוחות מחפשים "Likut"/"Delivered"/"Cancel"/"IngestionError".
+//
+// רשומת מלקט נוצרת עם name ששווה לשם המשתמש, ולכן מלקט בשם "Pending"
+// היה יכול לחזור מהחיפושים האלה במקום הסטטוס האמיתי — הזמנות חדשות היו
+// מקבלות סטטוס שגוי. השמות האלה חסומים לשימוש כשם משתמש.
+const RESERVED_STATUS_NAMES = [
+  "Pending",
+  "Processing",
+  "Likut",
+  "Delivered",
+  "Cancel",
+  "IngestionError",
+];
+
+const isReservedName = (value) =>
+  RESERVED_STATUS_NAMES.some(
+    (reserved) => reserved.toLowerCase() === String(value || "").toLowerCase()
+  );
+
 // שם המשתמש הוא מפתח ההתחברות לאפליקציית הליקוט, ולכן חייב להיות ייחודי.
 // הבדיקה נעשית כאן ולא באינדקס unique — ראה ההסבר ב-models/Status.js.
 // excludeId מאפשר לרשומה בעריכה לשמור על שם המשתמש הקיים שלה.
@@ -17,6 +38,10 @@ const isDuplicateKeyError = (err) => err?.code === 11000;
 const createStatus = async (req, res) => {
   try {
     const username = String(req.body.username || "").trim();
+
+    if (isReservedName(username)) {
+      return res.status(409).send({ message: "שם המשתמש שמור למערכת, יש לבחור אחר" });
+    }
 
     if (await isUsernameTaken(username)) {
       return res.status(409).send({ message: "שם המשתמש כבר תפוס" });
@@ -108,6 +133,9 @@ const updateStatus = async (req, res) => {
 
     if (req.body.username !== undefined) {
       const username = String(req.body.username || "").trim();
+      if (isReservedName(username)) {
+        return res.status(409).send({ message: "שם המשתמש שמור למערכת, יש לבחור אחר" });
+      }
       if (await isUsernameTaken(username, status._id)) {
         return res.status(409).send({ message: "שם המשתמש כבר תפוס" });
       }
@@ -116,7 +144,10 @@ const updateStatus = async (req, res) => {
 
     status.name = req.body.name || status.name;
     status.heName = req.body.heName || status.heName;
-    status.phone = req.body.phone || status.phone;
+    // בדיקת undefined ולא falsy: מאז שהטלפון אינו חובה למלקט, שליחת
+    // מחרוזת ריקה היא בקשה מפורשת לנקות אותו. עם `||` הניקוי היה נבלע
+    // בשקט והשדה הישן היה נשאר. קריאות ששולחות רק isActive לא נוגעות בו.
+    status.phone = req.body.phone !== undefined ? req.body.phone : status.phone;
     status.color = req.body.color || status.color;
     status.isActive = req.body.isActive !== undefined ? req.body.isActive : status.isActive;
     status.password = req.body.password !== undefined ? req.body.password : status.password;
