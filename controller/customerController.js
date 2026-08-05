@@ -5,6 +5,7 @@ const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 const Customer = require("../models/Customer");
+const CustomerPriceList = require("../models/CustomerPriceList");
 const Admin = require("../models/Admin");
 const Application = require("../models/Application");
 const Setting = require("../models/Setting");
@@ -41,11 +42,9 @@ const CUSTOMER_MANAGER_ROLES = ["Admin", "Super Admin", "CEO"];
 // התפקיד נבדק כאן מול טבלת האדמינים ולא נלקח מהטוקן: הטוקן תקף 21 יום, ובלי
 // הבדיקה הזו איש צוות שהושבת, נמחק או הורד בדרגה היה ממשיך לנהל לקוחות עד לפקיעתו.
 // שאילתה נוספת מתבצעת רק במסלול הצוות - לקוח שמעדכן את עצמו יוצא מיד
-const canManageCustomer = async (user, customer) => {
+const isCustomerManager = async (user) => {
   const email = user?.email;
-  // בלי שתי הבדיקות האלה שני ערכים ריקים היו נחשבים לזהים ומאשרים גישה
-  if (!email || !customer?.email) return false;
-  if (email === customer.email) return true;
+  if (!email) return false;
 
   const staff = await Admin.findOne({ email }).select("role status").lean();
   return (
@@ -54,6 +53,50 @@ const canManageCustomer = async (user, customer) => {
     CUSTOMER_MANAGER_ROLES.includes(staff.role)
   );
 };
+
+const canManageCustomer = async (user, customer) => {
+  const email = user?.email;
+  // בלי שתי הבדיקות האלה שני ערכים ריקים היו נחשבים לזהים ומאשרים גישה
+  if (!email || !customer?.email) return false;
+  if (email === customer.email) return true;
+
+  return isCustomerManager(user);
+};
+
+// שדות ההנהח"ש שניתן לערוך ידנית ממסך הלקוח בפאנל. הרשימה סגורה בכוונה:
+// הערכים הגולמיים מהקובץ (rawEmail, rawAddress, rawCity) ו-syncedAt נשמרים
+// כדי לדעת מה בדיוק הגיע מהיבוא, ואסור שטופס עריכה ידרוך עליהם
+const ERP_EDITABLE_FIELDS = [
+  "customerNumber",
+  "idNumber",
+  "customerType",
+  "contactPerson",
+  "landline",
+  "mobile",
+  "agent",
+  "active",
+  "points",
+  "discountPercent",
+  "cumulativePurchase",
+  "credit",
+  "openingBalance",
+  "priceLevel",
+  "paymentTerms",
+  "birthDate",
+  "openDate",
+  "lastPurchaseAt",
+  "notes",
+];
+
+// דגלי החשבון של הלקוח בחנות. רק איש צוות רשאי לשנות אותם - המסלול מוגן
+// ב-isAuth בלבד (גם לקוח מעדכן דרכו את הפרופיל שלו), ובלי ההפרדה הזו לקוח
+// היה יכול להפוך את עצמו לקופאי
+const STAFF_ONLY_FLAGS = [
+  "isCashier",
+  "inBlackList",
+  "isRegistered",
+  "shippingRewardIssued",
+];
 
 // בודק אם המספר כבר משויך ללקוח רשום קיים (חוץ מהרשומה שמשדרגים, אם יש).
 // כניסה בטלפון מזהה לקוח לפי המספר בלבד, ולכן שני חשבונות רשומים עם אותו מספר
@@ -1189,7 +1232,9 @@ const getCustomerDetails = async (req, res) => {
 
 const updateCustomer = async (req, res) => {
   try {
-    const customer = await Customer.findById(req.params.id);
+    // ‎+erp כדי שעריכת נתוני ההנהח"ש תמזג לתוך מה שקיים ולא תיצור אובייקט חדש
+    // שמאבד את הערכים הגולמיים מהקובץ (erp מוגדר select:false במודל)
+    const customer = await Customer.findById(req.params.id).select("+erp");
     if (customer) {
       if (!(await canManageCustomer(req?.user, customer))) {
         return res.status(403).send({
@@ -1215,6 +1260,39 @@ const updateCustomer = async (req, res) => {
           : req.body.phone;
       }
       if (req.body.image !== undefined) customer.image = req.body.image;
+
+      // מסך הלקוח בפאנל עורך גם את דגלי החשבון ואת נתוני ההנהח"ש. שניהם
+      // פתוחים לאיש צוות בלבד: לקוח שמעדכן את הפרופיל של עצמו עובר באותו
+      // מסלול, ובלי ההפרדה הוא היה יכול להעניק לעצמו הרשאות או לשנות יתרות.
+      // בדיקת התפקיד עולה שאילתה, ולכן היא נעשית רק כשהבקשה בכלל מנסה לגעת
+      // בשדות האלה - עדכון פרופיל רגיל מהחנות לא משלם עליה
+      const touchesStaffFields =
+        req.body.erp !== undefined ||
+        req.body.welcomeGift !== undefined ||
+        STAFF_ONLY_FLAGS.some((flag) => req.body[flag] !== undefined);
+
+      if (touchesStaffFields && (await isCustomerManager(req?.user))) {
+        STAFF_ONLY_FLAGS.forEach((flag) => {
+          if (req.body[flag] !== undefined) customer[flag] = !!req.body[flag];
+        });
+
+        if (req.body.welcomeGift?.isUsed !== undefined) {
+          customer.set("welcomeGift.isUsed", !!req.body.welcomeGift.isUsed);
+        }
+
+        // מיזוג ולא השמה: הטופס שולח רק את השדות שהוא מציג. ללקוח שנרשם
+        // בחנות אין erp כלל, והוא לא נוצר כאן - "לקוח חנות" נקבע לפי קיומו
+        if (req.body.erp && customer.erp) {
+          ERP_EDITABLE_FIELDS.forEach((field) => {
+            if (req.body.erp[field] === undefined) return;
+            const value = req.body.erp[field];
+            // מחרוזת ריקה בשדה מספר/תאריך נכשלת בהמרה של mongoose, ולכן
+            // "ניקוי" שדה נשמר כ-null ולא כ-""
+            customer.erp[field] = value === "" ? null : value;
+          });
+        }
+      }
+
       // customer.password = bcrypt.hashSync("12345678");
       const updatedUser = await customer.save();
       // הטוקן נועד לרענן את החיבור של הלקוח בחנות אחרי עדכון הפרופיל. איש צוות
@@ -1267,6 +1345,14 @@ const deleteCustomer = async (req, res) => {
     }
 
     await Customer.deleteOne({ _id: req.params.id });
+
+    // המחירון הפרטי נמחק יחד עם הלקוח, אחרת הוא נשאר במסד כרשומה יתומה שאף
+    // מסך אינו מציג ואף אחד אינו יכול להסיר.
+    // כשל כאן אינו מבטל מחיקה שכבר בוצעה - הלקוח נמחק, והשארית מדווחת ללוג
+    await CustomerPriceList.deleteOne({ customer: req.params.id }).catch((err) =>
+      console.log(`deleteCustomer: כשל במחיקת מחירון הלקוח — ${err.message}`)
+    );
+
     res.status(200).send({
       message: "המשתמש נמחק בהצלחה!",
     });
@@ -1569,4 +1655,8 @@ module.exports = {
   validateToken,
   contactUs,
   createGuestCustomer,
+  // מיוצא כדי שמחירוני הלקוחות ייאכפו באותו שער בדיוק שמגן על עריכת לקוח,
+  // בלי לשכפל את רשימת התפקידים במקום שני שיישכח בעדכון הבא
+  isCustomerManager,
+  CUSTOMER_MANAGER_ROLES,
 };

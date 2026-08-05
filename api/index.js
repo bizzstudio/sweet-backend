@@ -9,6 +9,7 @@ const { connectDB } = require("../config/db");
 const productRoutes = require("../routes/productRoutes");
 const offerRoutes = require("../routes/offerRoutes");
 const customerRoutes = require("../routes/customerRoutes");
+const customerPriceListRoutes = require("../routes/customerPriceListRoutes");
 const adminRoutes = require("../routes/adminRoutes");
 const orderRoutes = require("../routes/orderRoutes");
 const appOrderRoutes = require("../routes/appOrderRoutes");
@@ -98,6 +99,9 @@ app.use("/api/offers/", offerRoutes);
 app.use("/api/category/", categoryRoutes);
 app.use("/api/coupon/", couponRoutes);
 app.use("/api/customer/", customerRoutes);
+// מחירונים פרטיים ללקוחות. נתיב נפרד ולא תת-נתיב של /api/customer כדי שלא
+// ייבלע ע"י "/:id" שרשום שם
+app.use("/api/customer-price-list/", customerPriceListRoutes);
 app.use("/api/order/", customerOrderRoutes);
 app.use("/api/cashier-orders/", cashierOrderRoutes);
 app.use("/api/attributes/", attributeRoutes);
