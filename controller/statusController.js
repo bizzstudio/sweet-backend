@@ -10,6 +10,10 @@ const isUsernameTaken = async (username, excludeId) => {
   return Boolean(await Status.findOne(query));
 };
 
+// שתי בקשות מקבילות יכולות לעבור את isUsernameTaken ולהיכשל רק באינדקס
+// הייחודי. E11000 הוא אותה שגיאה מבחינת המשתמש — שם המשתמש תפוס.
+const isDuplicateKeyError = (err) => err?.code === 11000;
+
 const createStatus = async (req, res) => {
   try {
     const username = String(req.body.username || "").trim();
@@ -27,6 +31,9 @@ const createStatus = async (req, res) => {
     await status.save();
     res.status(201).send({ data: status, message: "Status created successfully!" });
   } catch (err) {
+    if (isDuplicateKeyError(err)) {
+      return res.status(409).send({ message: "שם המשתמש כבר תפוס" });
+    }
     res.status(400).send(err);
   }
 };
@@ -34,17 +41,34 @@ const createStatus = async (req, res) => {
 const getAllStatuses = async (req, res) => {
   try {
     const filter = req.query.getAll === 'true' ? {} : { isActive: true };
-    const query = Status.find(filter).sort({ isActive: -1 });
-
-    // דף המלקטים באדמין מציג את הסיסמה מאחורי כפתור עין, ולכן צריך אותה
-    // ברשימה. הנתיב כולו יושב מאחורי isAdmin, ולקוחות אחרים לא מבקשים
-    // את הדגל ולכן ממשיכים לקבל תשובה בלי סיסמאות.
-    if (req.query.withPassword === 'true') {
-      query.select('+password');
-    }
-
-    const statuses = await query;
+    const statuses = await Status.find(filter).sort({ isActive: -1 });
     res.send(statuses);
+  } catch (err) {
+    res.status(500).send(err);
+  }
+};
+
+// רשימת המלקטים לדף הניהול, כולל הסיסמאות — הן מוצגות שם מאחורי כפתור עין.
+//
+// נתיב נפרד, ולא דגל על getAllStatuses: אותו handler מוגש גם תחת
+// /api/app/orders/status/getAll מאחורי isApp, כלומר לכל מלקט מחובר. דגל
+// כזה היה מאפשר למלקט אחד לשלוף את הסיסמאות של כל השאר. הנתיב הזה רשום
+// רק ב-statusRoutes, שכולו מאחורי isAdmin.
+const getAllMelaketim = async (req, res) => {
+  try {
+    const melaketim = await Status.find({
+      $or: [
+        { isMelaket: true },
+        // מלקטים ותיקים, מלפני שהדגל נוסף. סטטוסי ההזמנות נזרעים עם
+        // phone: "" ולכן נשארים מחוץ לרשימה, ו-IngestionError נוצר בלי
+        // השדה בכלל.
+        { phone: { $exists: true, $nin: ["", null] } },
+      ],
+    })
+      .select('+password')
+      .sort({ isActive: -1, heName: 1 });
+
+    res.send(melaketim);
   } catch (err) {
     res.status(500).send(err);
   }
@@ -100,6 +124,9 @@ const updateStatus = async (req, res) => {
     await status.save();
     res.send({ data: status, message: "Status updated successfully!" });
   } catch (err) {
+    if (isDuplicateKeyError(err)) {
+      return res.status(409).send({ message: "שם המשתמש כבר תפוס" });
+    }
     res.status(400).send(err);
   }
 };
@@ -144,6 +171,7 @@ const deleteManyStatuses = async (req, res) => {
 module.exports = {
   createStatus,
   getAllStatuses,
+  getAllMelaketim,
   getStatusById,
   getStatusByName,
   updateStatus,

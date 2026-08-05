@@ -3,6 +3,7 @@ const router = express.Router();
 const {
   createStatus,
   getAllStatuses,
+  getAllMelaketim,
   getStatusById,
   updateStatus,
   deleteStatus,
@@ -13,6 +14,8 @@ const {
 // ניתובים עבור Status
 router.post("/", createStatus);
 router.get("/", getAllStatuses);
+// חייב להירשם לפני "/:id", אחרת "melaketim" נתפס כמזהה ו-findById נופל.
+router.get("/melaketim", getAllMelaketim);
 router.get("/:id", getStatusById);
 router.get("/name/:name", getStatusByName);
 router.put("/:id", updateStatus);

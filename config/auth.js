@@ -124,16 +124,24 @@ const loginApp = async (req, res) => {
   try {
     // מלקטים חדשים מתחברים בשם משתמש, ותיקים עדיין לפי טלפון — לכן שני
     // השדות מתקבלים והאפליקציה שולחת את מה שהוקלד בשדה היחיד שלה.
-    const identifier = String(username ?? phone ?? "").trim();
+    //
+    // הבדיקה typeof היא מחסום הזרקה, לא ניקוי סגנוני: express.json מפרש
+    // גוף בקשה ל-JSON, ולכן { "password": { "$ne": null } } היה מגיע
+    // כאובייקט לתוך השאילתה ומתאים לכל מלקט שיש לו סיסמה — עקיפת אימות
+    // מלאה עבור כל מי שיודע מספר טלפון של מלקט.
+    const asText = (value) => (typeof value === "string" ? value.trim() : "");
+
+    const identifier = asText(username) || asText(phone);
+    const secret = typeof password === "string" ? password : "";
 
     // בלי החסימה הזו מזהה ריק היה מותאם לסטטוסי ההזמנה, שנזרעים עם
     // phone: "" ויושבים באותו collection.
-    if (!identifier || !password) {
+    if (!identifier || !secret) {
       return res.status(401).send("שם משתמש או סיסמה שגויים");
     }
 
     const melaket = await Status.findOne({
-      password,
+      password: secret,
       $or: [{ username: identifier }, { phone: identifier }],
     });
     if (!melaket) {
