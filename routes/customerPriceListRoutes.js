@@ -19,6 +19,8 @@ const {
   checkImportCustomerPriceList,
   importCustomerPriceList,
   deleteCustomerPriceList,
+  checkImportBulkPriceLists,
+  importBulkPriceLists,
 } = require("../controller/customerPriceListController");
 const { isCustomerManager } = require("../controller/customerController");
 const { isAdmin } = require("../config/auth");
@@ -40,6 +42,14 @@ const isPriceListManager = async (req, res, next) => {
 
 // סיכום לכל הלקוחות (למי יש מחירון וכמה שורות) — לרשימת הלקוחות
 router.get("/", isAdmin, getPriceListSummary);
+
+// ── היבוא המרוכז — נרשם לפני "/:customerId" ──
+//
+// "bulk" הוא מזהה לקוח תקין מבחינת הנתב, ולכן הנתיבים האלה חייבים להקדים את
+// הנתיבים הפרמטריים, אחרת הם היו נבלעים בהם ומוחזרת שגיאת "לקוח לא נמצא".
+// אותה רמת הרשאה כמו היבוא הבודד: מחירון קובע כמה הלקוח משלם.
+router.post("/bulk/check", isAdmin, isPriceListManager, checkImportBulkPriceLists);
+router.post("/bulk", isAdmin, isPriceListManager, importBulkPriceLists);
 
 // בדיקה מקדימה לפני יבוא — חייב להירשם לפני "/:customerId"
 router.post("/:customerId/check", isAdmin, isPriceListManager, checkImportCustomerPriceList);

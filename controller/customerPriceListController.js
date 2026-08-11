@@ -205,6 +205,405 @@ const findCustomer = async (customerId) => {
   return Customer.findById(customerId).select("_id name lastName email").lean();
 };
 
+/* ------------------------------------------------------------------ *
+ * יבוא מרוכז: קובץ אחד עם המחירונים של כל הלקוחות
+ * ------------------------------------------------------------------ */
+
+// כמה לקוחות בבקשה אחת. הקובץ של ההנהח"ש הוא כ-63,000 שורות ל-685 לקוחות,
+// כלומר הוא לא נכנס לבקשה אחת (תקרת express.json היא 4MB). הפיצול נעשה
+// **לפי לקוח ולא לפי שורה**: מחירון של לקוח חייב להישלח שלם, אחרת אצווה שנכשלה
+// באמצע הייתה משאירה אותו עם חצי מחירון — וכאן הדריסה היא מלאה.
+const MAX_BULK_CUSTOMERS = 200;
+
+// מספר לקוח מגיע פעם כמחרוזת ופעם כמספר (אקסל קורא "0552" כ-552), ולכן
+// ההתאמה מנסה קודם את הצורה המדויקת ואז את הצורה המספרית — אותו שיקול בדיוק
+// כמו במק"ט (numericSkuKey)
+const numericCustomerKey = (value) => {
+  if (!/^\d+$/.test(value)) return null;
+  const num = Number(value);
+  return Number.isSafeInteger(num) ? String(num) : null;
+};
+
+/**
+ * מיפוי מספר לקוח (erp.customerNumber) → מסמך הלקוח.
+ * המפתח המספרי נוסף רק כשאין התאמה מדויקת באותו מפתח.
+ */
+const fetchCustomersByNumber = async (numbers) => {
+  const byNumber = new Map();
+  const numericAliases = new Map();
+
+  const unique = [...new Set(numbers.filter(Boolean))];
+  for (let i = 0; i < unique.length; i += CHUNK_SIZE) {
+    const chunk = unique.slice(i, i + CHUNK_SIZE);
+    const found = await Customer.find({ "erp.customerNumber": { $in: chunk } })
+      .select("_id name lastName erp.customerNumber")
+      .lean();
+
+    found.forEach((customer) => {
+      const number = toText(customer.erp?.customerNumber);
+      if (!number) return;
+      byNumber.set(number, customer);
+      const alias = numericCustomerKey(number);
+      if (alias && alias !== number) numericAliases.set(alias, customer);
+    });
+  }
+
+  for (const [key, customer] of numericAliases) {
+    if (!byNumber.has(key)) byNumber.set(key, customer);
+  }
+
+  return byNumber;
+};
+
+const lookupCustomer = (byNumber, number) => {
+  if (byNumber.has(number)) return byNumber.get(number);
+  const alias = numericCustomerKey(number);
+  return alias ? byNumber.get(alias) || null : null;
+};
+
+const customerLabel = (customer) =>
+  `${customer?.name || ""} ${customer?.lastName || ""}`.trim();
+
+const readBulkEntries = (req) =>
+  Array.isArray(req.body?.customers) ? req.body.customers : [];
+
+/* ------------------------------------------------------------------ *
+ * בדיקה מקדימה ליבוא המרוכז.
+ *
+ * הבדיקה נעשית על **מטא-נתונים בלבד** — מספרי הלקוח, ורשימת המק"טים
+ * הייחודיים עם השם שליד כל אחד — ולא על השורות עצמן: הקובץ המלא אינו נכנס
+ * לבקשה אחת, והמחיר עצמו אינו נבדק מול דבר.
+ *
+ * אימות השמות הוא הבדיקה החשובה כאן, בדיוק כמו ביבוא הבודד: ההתאמה נעשית לפי
+ * מק"ט בלבד, ולכן קובץ שבו עמודה הוזזה ייראה תקין לחלוטין — כל המק"טים קיימים —
+ * אבל יתמחר כל מוצר במחיר של מוצר אחר, והפעם אצל **כל** הלקוחות בבת אחת.
+ * ------------------------------------------------------------------ */
+
+// תקרות לקלט הבדיקה. הבקשה הזו מייצרת שאילתות $in לפי גודל הקלט, ובלי תקרה
+// מערך מנופח היה מתורגם לאלפי שאילתות — עומס שמקורו בגוף הבקשה ולא בנתונים
+const MAX_CHECK_CUSTOMERS = 5000;
+const MAX_CHECK_PRODUCTS = MAX_ROWS;
+
+const checkImportBulkPriceLists = async (req, res) => {
+  try {
+    const rawNumbers = Array.isArray(req.body?.customerNumbers)
+      ? req.body.customerNumbers
+      : [];
+    if (rawNumbers.length > MAX_CHECK_CUSTOMERS) {
+      return res
+        .status(400)
+        .send({ message: `ניתן לבדוק עד ${MAX_CHECK_CUSTOMERS} לקוחות בבקשה אחת` });
+    }
+
+    const numbers = [...new Set(rawNumbers.map(toText).filter(Boolean))];
+    if (numbers.length === 0) {
+      return res.status(400).send({ message: "לא נשלחו מספרי לקוח" });
+    }
+
+    const rawProducts = Array.isArray(req.body?.products) ? req.body.products : [];
+    if (rawProducts.length > MAX_CHECK_PRODUCTS) {
+      return res
+        .status(400)
+        .send({ message: `ניתן לבדוק עד ${MAX_CHECK_PRODUCTS} מוצרים בבקשה אחת` });
+    }
+
+    // מק"ט כפול ברשימה נלקח מהמופע האחרון, כמו בכל מקום אחר ביבוא
+    const productsBySku = new Map();
+    rawProducts.forEach((product) => {
+      const sku = toText(product?.sku);
+      if (!sku || sku.length > MAX_SKU_LENGTH) return;
+      productsBySku.set(sku, toText(product?.name).slice(0, MAX_NAME_LENGTH));
+    });
+
+    const byNumber = await fetchCustomersByNumber(numbers);
+
+    const matched = [];
+    const unknownNumbers = [];
+    for (const number of numbers) {
+      const customer = lookupCustomer(byNumber, number);
+      if (customer) matched.push({ number, customer });
+      else if (unknownNumbers.length < MAX_SAMPLES) unknownNumbers.push(number);
+    }
+
+    // הספירה מופרדת מהדוגמאות: unknownNumbers חסום ב-MAX_SAMPLES, ודיווח
+    // ‏length שלו כספירה היה מרגיע יותר מהמצב האמיתי
+    const unknownCount = numbers.length - matched.length;
+
+    // אילו מהלקוחות המותאמים כבר מחזיקים מחירון — כלומר למי היבוא **דורס**
+    const existing = await CustomerPriceList.find({
+      customer: { $in: matched.map((item) => item.customer._id) },
+    })
+      .select("customer itemsCount")
+      .lean();
+    const existingByCustomer = new Map(
+      existing.map((list) => [String(list.customer), list.itemsCount || 0])
+    );
+
+    const skus = [...productsBySku.keys()];
+    const catalogBySku = skus.length > 0 ? await fetchCatalogBySku(skus) : new Map();
+
+    const unknownSkuSamples = [];
+    const nameMismatches = [];
+    let unknownSkuCount = 0;
+    let nameMismatchCount = 0;
+    let hiddenProductCount = 0;
+
+    for (const [sku, name] of productsBySku) {
+      const product = lookupCatalog(catalogBySku, sku);
+      if (!product) {
+        unknownSkuCount += 1;
+        if (unknownSkuSamples.length < MAX_SAMPLES) unknownSkuSamples.push(sku);
+        continue;
+      }
+
+      if (product.status !== "show") hiddenProductCount += 1;
+
+      const catalogName = normalizeName(product.title?.he || product.title?.en);
+      const fileName = normalizeName(name);
+      if (fileName && catalogName && fileName !== catalogName) {
+        nameMismatchCount += 1;
+        if (nameMismatches.length < MAX_SAMPLES) {
+          nameMismatches.push({
+            sku,
+            fileName: name,
+            catalogTitle: product.title?.he || product.title?.en || "",
+          });
+        }
+      }
+    }
+
+    res.send({
+      customersInFile: numbers.length,
+      matched: matched.length,
+      unknown: unknownCount,
+      unknownNumbers,
+      overwrites: existing.length,
+      // מי מהלקוחות כבר מחזיק מחירון, לתצוגה מפורטת במסך
+      overwriteSamples: matched
+        .filter((item) => existingByCustomer.has(String(item.customer._id)))
+        .slice(0, MAX_SAMPLES)
+        .map((item) => ({
+          customerNumber: item.number,
+          customerName: customerLabel(item.customer),
+          itemsCount: existingByCustomer.get(String(item.customer._id)),
+        })),
+      matchedSamples: matched.slice(0, MAX_SAMPLES).map((item) => ({
+        customerNumber: item.number,
+        customerName: customerLabel(item.customer),
+      })),
+      skus: skus.length,
+      skusInCatalog: skus.length - unknownSkuCount,
+      unknownSkuCount,
+      unknownSkuSamples,
+      nameMismatchCount,
+      nameMismatches,
+      hiddenProductCount,
+    });
+  } catch (err) {
+    console.log("checkImportBulkPriceLists error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/* ------------------------------------------------------------------ *
+ * יבוא מרוכז של אצוות לקוחות מתוך קובץ אחד.
+ *
+ * כל לקוח באצווה מקבל **דריסה מלאה** של המחירון שלו, בדיוק כמו ביבוא הבודד —
+ * מחירון הוא הקובץ שהלקוח קיבל. לקוח שאינו בקובץ אינו נגע כלל: היעדרותו מהקובץ
+ * אינה "מחירון ריק" אלא פשוט לקוח שלא נכלל בייצוא הזה.
+ * ------------------------------------------------------------------ */
+const importBulkPriceLists = async (req, res) => {
+  try {
+    const entries = readBulkEntries(req);
+    if (entries.length === 0) {
+      return res.status(400).send({ message: "לא נשלחו מחירונים" });
+    }
+    if (entries.length > MAX_BULK_CUSTOMERS) {
+      return res
+        .status(400)
+        .send({ message: `ניתן לייבא עד ${MAX_BULK_CUSTOMERS} לקוחות בבקשה אחת` });
+    }
+
+    const totalRows = entries.reduce(
+      (sum, entry) => sum + (Array.isArray(entry?.rows) ? entry.rows.length : 0),
+      0
+    );
+    if (totalRows > MAX_ROWS) {
+      return res
+        .status(400)
+        .send({ message: `ניתן לייבא עד ${MAX_ROWS} שורות בבקשה אחת` });
+    }
+
+    const byNumber = await fetchCustomersByNumber(
+      entries.map((entry) => toText(entry?.customerNumber))
+    );
+
+    // ‏toText ולא String(...): ערך שאינו פרימיטיבי היה נשמר כאן כמחרוזת
+    // "[object Object]" במקום להידחות
+    const fileName = toText(req.body?.fileName).slice(0, MAX_NAME_LENGTH);
+    const importedBy = req.user?.email || "";
+    const now = new Date();
+
+    const failures = [];
+    // כל המק"טים של האצווה נבדקים בשאילתה אחת ולא פעם ללקוח: לקוחות באותו קובץ
+    // חולקים כמעט את אותו קטלוג, ובדיקה ללקוח הייתה מכפילה את אותה שאילתה
+    // מאות פעמים
+    const batchSkus = new Set();
+
+    // ── דה-דופליקציה לפי הלקוח שנפתר, ולא לפי המספר שנשלח ──
+    //
+    // שני מספרים שונים יכולים להצביע על אותו לקוח ("0552" ו-552 נפתרים דרך
+    // המפתח המספרי), ואותו מספר יכול להישלח פעמיים בגוף בקשה מעוות. שני
+    // upsert על אותו לקוח באותה אצווה אינם שגיאה במונגו — הם פשוט נבלעים זה
+    // בזה — וכך הדוח דיווח "נשמרו 2" כשבפועל נשמר מסמך אחד, **והמחיר שנשמר
+    // נקבע בסדר לא מוגדר**. לכן הכפילות מקובצת כאן: המופע האחרון קובע, כמו
+    // שורה כפולה בתוך מחירון, והקיבוץ מדווח.
+    const byCustomerId = new Map();
+    let collapsed = 0;
+
+    for (const entry of entries) {
+      const number = toText(entry?.customerNumber);
+      const rows = Array.isArray(entry?.rows) ? entry.rows : [];
+
+      if (!number) {
+        failures.push({ customerNumber: "", message: "חסר מספר לקוח" });
+        continue;
+      }
+
+      const customer = lookupCustomer(byNumber, number);
+      if (!customer) {
+        failures.push({
+          customerNumber: number,
+          customerName: toText(entry?.customerName),
+          message: "לא נמצא לקוח עם מספר זה",
+        });
+        continue;
+      }
+
+      const { items, invalid, duplicates } = collectValidRows(rows);
+      if (items.length === 0) {
+        // מחירון בלי שורה תקינה **אינו** דורס את הקיים: קובץ פגום לא יאפס
+        // ללקוח את המחירים שלו בשקט
+        failures.push({
+          customerNumber: number,
+          customerName: customerLabel(customer),
+          message: "לא נמצאה אף שורה תקינה",
+        });
+        continue;
+      }
+
+      const key = String(customer._id);
+      if (byCustomerId.has(key)) collapsed += 1;
+
+      byCustomerId.set(key, {
+        customer,
+        customerNumber: number,
+        items,
+        skipped: invalid.length,
+        duplicates,
+      });
+    }
+
+    const prepared = [...byCustomerId.values()];
+    prepared.forEach((entry) =>
+      entry.items.forEach((item) => batchSkus.add(item.sku))
+    );
+
+    const operations = prepared.map((entry) => ({
+      updateOne: {
+        filter: { customer: entry.customer._id },
+        update: {
+          $set: {
+            items: entry.items.map(({ sku, price, name }) => ({ sku, price, name })),
+            itemsCount: entry.items.length,
+            fileName,
+            importedBy,
+            importedAt: now,
+          },
+        },
+        upsert: true,
+      },
+    }));
+
+    let created = 0;
+    let updated = 0;
+
+    if (operations.length > 0) {
+      // ── מרוץ על יצירת המסמך ──
+      //
+      // ‏upsert על אינדקס ייחודי אינו אטומי מול תחרות: אם יבוא אחר (בודד או
+      // מרוכז) יוצר את אותו מחירון באותו רגע, אחד מהם נופל ב-11000. בניסיון
+      // החוזר המסמך כבר קיים והפעולה הופכת לעדכון. בלי זה אצווה שלמה הייתה
+      // חוזרת כ-500, והמסך היה מסמן כנכשלים גם את הלקוחות שכן נשמרו בה.
+      //
+      // ‏ordered: false — לקוח אחד שנכשל לא עוצר את שאר האצווה
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const result = await CustomerPriceList.bulkWrite(operations, {
+            ordered: false,
+          });
+          created = result.upsertedCount || 0;
+          // ‏matchedCount ולא modifiedCount: יבוא חוזר וזהה אינו "משנה" מסמך
+          // במונגו, והדוח היה מציג 0 עדכונים למרות שכל המחירונים נכתבו
+          updated = result.matchedCount || 0;
+          break;
+        } catch (err) {
+          if (err.code !== 11000 || attempt === 2) throw err;
+          console.warn("[priceList] מרוץ על יצירת מחירון באצווה — ניסיון חוזר");
+        }
+      }
+    }
+
+    // ── ספירת המק"טים שאינם בקטלוג אינה חלק מהכתיבה ──
+    //
+    // היא רצה **אחרי** שהמחירונים כבר נשמרו, ולכן כשל שלה אינו כשל של היבוא.
+    // בלי ההפרדה הזו שאילתה שנפלה הייתה מחזירה 500 על יבוא שהצליח, והמסך היה
+    // מסמן את כל הלקוחות באצווה כנכשלים — ומזמין יבוא חוזר מיותר.
+    let existingSkus = null;
+    try {
+      if (batchSkus.size > 0) existingSkus = await fetchExistingSkus([...batchSkus]);
+    } catch (err) {
+      console.log("importBulkPriceLists catalog stats error: ", err);
+    }
+
+    let notInCatalog = 0;
+    const report = prepared.map((entry) => {
+      const missing = existingSkus
+        ? entry.items.filter((item) => !existsInCatalog(existingSkus, item.sku)).length
+        : null;
+      if (missing) notInCatalog += missing;
+      return {
+        customerNumber: entry.customerNumber,
+        customerName: customerLabel(entry.customer),
+        customerId: String(entry.customer._id),
+        items: entry.items.length,
+        skipped: entry.skipped,
+        duplicates: entry.duplicates,
+        notInCatalog: missing,
+      };
+    });
+
+    res.send({
+      message: `נשמרו מחירונים ל-${report.length} לקוחות`,
+      customersReceived: entries.length,
+      customersImported: report.length,
+      // לקוחות שהופיעו יותר מפעם אחת באותה בקשה ואוחדו לכתיבה אחת
+      collapsedDuplicates: collapsed,
+      created,
+      updated,
+      rowsImported: prepared.reduce((sum, entry) => sum + entry.items.length, 0),
+      // ‏null כשספירת הקטלוג לא רצה — כדי שהמסך לא יציג 0 שנראה כמו "הכול תקין"
+      notInCatalog: existingSkus ? notInCatalog : null,
+      failed: failures.length,
+      failures: failures.slice(0, MAX_SAMPLES),
+      results: report,
+    });
+  } catch (err) {
+    console.log("importBulkPriceLists error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
 const readRows = (req) => (Array.isArray(req.body?.rows) ? req.body.rows : []);
 
 /* ------------------------------------------------------------------ *
@@ -534,5 +933,8 @@ module.exports = {
   checkImportCustomerPriceList,
   importCustomerPriceList,
   deleteCustomerPriceList,
+  checkImportBulkPriceLists,
+  importBulkPriceLists,
   MAX_ROWS,
+  MAX_BULK_CUSTOMERS,
 };
