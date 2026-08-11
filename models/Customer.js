@@ -133,6 +133,16 @@ const customerSchema = new mongoose.Schema(
       type: String,
       required: false,
     },
+    // הסיסמה כטקסט גלוי, לצד הצורה המוצפנת ב-password. נשמרת כדי שכרטיס
+    // הלקוח בפאנל יוכל להציג את הסיסמה שלו ולאפשר כניסה לחנות בשמו.
+    // select:false כדי שלא תצא בשום תגובה רגילה - רק מסך "צפייה בלקוח"
+    // מבקש אותה במפורש. כל שינוי סיסמה חייב לעבור ב-setCustomerPassword
+    // (controller/customerController.js), אחרת הערך כאן נשאר על סיסמה ישנה
+    plainPassword: {
+      type: String,
+      required: false,
+      select: false,
+    },
     inBlackList: { // האם הלקוח לא רוצה לקבל הודעות סקר
       type: Boolean,
       default: false,

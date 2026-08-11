@@ -936,5 +936,4 @@ module.exports = {
   checkImportBulkPriceLists,
   importBulkPriceLists,
   MAX_ROWS,
-  MAX_BULK_CUSTOMERS,
 };

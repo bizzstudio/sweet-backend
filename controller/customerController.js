@@ -54,6 +54,18 @@ const isCustomerManager = async (user) => {
   );
 };
 
+// אורך הסיסמה המינימלי שהפאנל רשאי לקבוע ללקוח
+const MIN_PASSWORD_LENGTH = 6;
+
+// קביעת סיסמה ללקוח. נשמרת מוצפנת (password) לצורך הכניסה, ובמקביל כטקסט
+// גלוי (plainPassword) כדי שכרטיס הלקוח בפאנל יציג אותה. כל מקום שמשנה
+// סיסמה חייב לעבור כאן - אחרת הערך הגלוי נשאר על סיסמה ישנה, והפאנל מציג
+// סיסמה שכבר אינה עובדת
+const setCustomerPassword = (customer, plainPassword) => {
+  customer.password = bcrypt.hashSync(plainPassword);
+  customer.plainPassword = plainPassword;
+};
+
 const canManageCustomer = async (user, customer) => {
   const email = user?.email;
   // בלי שתי הבדיקות האלה שני ערכים ריקים היו נחשבים לזהים ומאשרים גישה
@@ -131,7 +143,11 @@ const verifyEmailAddress = async (req, res) => {
   try {
     console.log('verifyEmailAddress req.body: ', req.body)
 
-    const existingCustomer = await Customer.findOne({ email: req.body.email.toLowerCase() });
+    // ‎+plainPassword: השדה מוגדר select:false, והרשומה הזו עשויה לקבל כאן
+    // סיסמה חדשה (setCustomerPassword) - טעינה מפורשת שומרת על ההשמה חד-משמעית
+    const existingCustomer = await Customer.findOne({
+      email: req.body.email.toLowerCase(),
+    }).select("+plainPassword");
 
     // אם האימייל כבר רשום - מחזירים שגיאה (עדיפות על בדיקת הטלפון, כי זו רשומה
     // של אותו לקוח שכבר יש לו חשבון)
@@ -157,7 +173,7 @@ const verifyEmailAddress = async (req, res) => {
       if (req.body.lastName) existingCustomer.lastName = req.body.lastName;
       if (req.body.phone) existingCustomer.phone = req.body.phone;
       if (req.body.password) {
-        existingCustomer.password = bcrypt.hashSync(req.body.password);
+        setCustomerPassword(existingCustomer, req.body.password);
       }
       await assignWelcomeGiftToCustomer(existingCustomer);
 
@@ -213,7 +229,8 @@ const registerCustomer = async (req, res) => {
   console.log('name: ', name)
   console.log('lastName: ', lastName)
   console.log('email: ', email)
-  console.log('password: ', password)
+  // הסיסמה עצמה אינה נכתבת ללוג: היא מגיעה כטקסט גלוי מטוקן ההרשמה, ולוגים
+  // של השרת נשמרים ונקראים במקומות שאין להם שום סיבה להחזיק סיסמאות לקוחות
   console.log('phone: ', phone)
   const isAdded = await Customer.findOne({ email: email });
 
@@ -260,6 +277,8 @@ const registerCustomer = async (req, res) => {
           email,
           phone,
           password: bcrypt.hashSync(password),
+          // נשמרת גם כטקסט גלוי לכרטיס הלקוח בפאנל (ראו setCustomerPassword)
+          plainPassword: password,
           isRegistered: true,
         });
         await assignWelcomeGiftToCustomer(newUser);
@@ -768,7 +787,10 @@ const importCustomers = async (req, res) => {
 
 const loginCustomer = async (req, res) => {
   try {
-    const customer = await Customer.findOne({ email: req.body.registerEmail });
+    // האימייל נשמר במודל באותיות קטנות (lowercase: true), ולכן חיפוש לפי מה
+    // שהוקלד כמו שהוא לא מוצא לקוח שהוקלדה לו אות גדולה או נוסף רווח בהדבקה
+    const email = String(req.body.registerEmail || "").trim().toLowerCase();
+    const customer = await Customer.findOne({ email });
 
     if (
       customer &&
@@ -999,7 +1021,10 @@ const forgetPassword = async (req, res) => {
 const resetPassword = async (req, res) => {
   const token = req.body.token;
   const { email } = jwt.decode(token);
-  const customer = await Customer.findOne({ email: email });
+  // ‎+plainPassword: השדה select:false ונכתב כאן מחדש (setCustomerPassword)
+  const customer = await Customer.findOne({ email: email }).select(
+    "+plainPassword"
+  );
 
   if (token) {
     jwt.verify(token, process.env.JWT_SECRET_FOR_VERIFY, (err, decoded) => {
@@ -1009,7 +1034,7 @@ const resetPassword = async (req, res) => {
           message: "פג תוקף הבקשה, אנא נסה שוב",
         });
       } else {
-        customer.password = bcrypt.hashSync(req.body.newPassword);
+        setCustomerPassword(customer, req.body.newPassword);
         customer.save();
         res.send({
           message: "הסיסמה הוחלפה בהצלחה, אפשר להתחבר עכשיו!",
@@ -1021,7 +1046,10 @@ const resetPassword = async (req, res) => {
 
 const changePassword = async (req, res) => {
   try {
-    const customer = await Customer.findOne({ email: req.body.email });
+    // ‎+plainPassword: השדה select:false ונכתב כאן מחדש (setCustomerPassword)
+    const customer = await Customer.findOne({ email: req.body.email }).select(
+      "+plainPassword"
+    );
     if (req?.user?.email !== customer.email) {
       return res.status(403).send({
         message: "You are not authorized to change this password!",
@@ -1036,7 +1064,7 @@ const changePassword = async (req, res) => {
       customer &&
       bcrypt.compareSync(req.body.currentPassword, customer.password)
     ) {
-      customer.password = bcrypt.hashSync(req.body.newPassword);
+      setCustomerPassword(customer, req.body.newPassword);
       await customer.save();
       res.send({
         message: "הסיסמה שונתה בהצלחה!",
@@ -1205,15 +1233,30 @@ const getCustomerById = async (req, res) => {
 // כרטיס לקוח מלא למסך "צפייה בלקוח" באדמין: כל שדות החנות יחד עם נתוני
 // ההנהח"ש מיבוא האקסל. erp מוגדר select:false במודל ולכן צריך לבקש אותו
 // במפורש - בלי זה המסך היה מציג רק שם, מייל וטלפון.
-// הסיסמה מוסרת: היא לא נחוצה בתצוגה ואין סיבה להוציא אותה מהשרת.
+// הצורה המוצפנת של הסיסמה מוסרת - אין בה שום שימוש במסך; מה שכן יוצא הוא
+// הסיסמה כטקסט גלוי (plainPassword), כדי שאפשר יהיה לראות אותה בכרטיס
+// ולהיכנס איתה לחנות, ולצידה סימון האם ללקוח יש סיסמה בכלל
 const getCustomerDetails = async (req, res) => {
   try {
     const customer = await Customer.findById(req.params.id)
-      .select("+erp -password")
+      .select("+erp +plainPassword")
       .lean();
 
     if (!customer) {
       return res.status(404).send({ message: "לקוח לא נמצא" });
+    }
+
+    // ללקוח שקבע לעצמו סיסמה לפני שהשדה הגלוי נוסף אין plainPassword, ולכן
+    // הסימון הזה הוא מה שמבדיל בין "אין סיסמה" ל"יש סיסמה שאינה ניתנת לצפייה"
+    customer.hasPassword = !!customer.password;
+    delete customer.password;
+
+    // הסיסמה הגלויה נחשפת רק לתפקידים שרשאים גם לקבוע אותה. isAdmin מכניס
+    // לכאן כל איש צוות פעיל - גם נהג, מלקט או קופאי - ובלעדי הסינון הזה כל
+    // אחד מהם היה יכול לקרוא את הסיסמה של כל לקוח ולהיכנס לחנות בשמו.
+    // התפקיד נלקח מ-req.user שאותו isAdmin טוען מהמסד, ולכן אין כאן שאילתה נוספת
+    if (!CUSTOMER_MANAGER_ROLES.includes(req?.user?.role)) {
+      delete customer.plainPassword;
     }
 
     res.send(customer);
@@ -1233,8 +1276,12 @@ const getCustomerDetails = async (req, res) => {
 const updateCustomer = async (req, res) => {
   try {
     // ‎+erp כדי שעריכת נתוני ההנהח"ש תמזג לתוך מה שקיים ולא תיצור אובייקט חדש
-    // שמאבד את הערכים הגולמיים מהקובץ (erp מוגדר select:false במודל)
-    const customer = await Customer.findById(req.params.id).select("+erp");
+    // שמאבד את הערכים הגולמיים מהקובץ (erp מוגדר select:false במודל).
+    // ‎+plainPassword כדי לזהות שהסיסמה שנשלחה זהה לזו השמורה ולא להצפין
+    // אותה מחדש בכל שמירה של הכרטיס
+    const customer = await Customer.findById(req.params.id).select(
+      "+erp +plainPassword"
+    );
     if (customer) {
       if (!(await canManageCustomer(req?.user, customer))) {
         return res.status(403).send({
@@ -1269,12 +1316,44 @@ const updateCustomer = async (req, res) => {
       const touchesStaffFields =
         req.body.erp !== undefined ||
         req.body.welcomeGift !== undefined ||
+        req.body.password !== undefined ||
         STAFF_ONLY_FLAGS.some((flag) => req.body[flag] !== undefined);
 
       if (touchesStaffFields && (await isCustomerManager(req?.user))) {
         STAFF_ONLY_FLAGS.forEach((flag) => {
           if (req.body[flag] !== undefined) customer[flag] = !!req.body[flag];
         });
+
+        // קביעת סיסמה ללקוח מהפאנל, כדי שאפשר יהיה להיכנס איתה לחנות בשמו.
+        // הטופס שולח את השדה רק כשהוא שונה מהסיסמה השמורה, ולכן שמירה רגילה
+        // של הכרטיס אינה נוגעת בסיסמה בכלל
+        if (req.body.password !== undefined) {
+          // בדיקת typeof ולא רק המרה למחרוזת: גוף בקשה ב-JSON יכול להביא
+          // אובייקט או מערך, ו-String() היה הופך אותו ל"סיסמה" תקינה לכאורה
+          // ("[object Object]") שנשמרת בפועל ללקוח
+          if (req.body.password !== null && typeof req.body.password !== "string") {
+            return res.status(400).send({ message: "סיסמה לא תקינה." });
+          }
+
+          const newPassword = String(req.body.password || "").trim();
+
+          if (!newPassword) {
+            // ניקוי מכוון של השדה מבטל את הכניסה עם סיסמה. הלקוח עדיין יכול
+            // להיכנס עם מספר טלפון וקוד ב-SMS
+            customer.password = undefined;
+            customer.plainPassword = undefined;
+          } else if (newPassword.length < MIN_PASSWORD_LENGTH) {
+            return res.status(400).send({
+              message: `הסיסמה חייבת להכיל לפחות ${MIN_PASSWORD_LENGTH} תווים.`,
+            });
+          } else if (newPassword !== customer.plainPassword) {
+            setCustomerPassword(customer, newPassword);
+            // לקוח שיש לו סיסמה יכול להיכנס לחנות, ולכן אין מצב שהוא מסומן
+            // כלא רשום. נקבע אחרי הלולאה של STAFF_ONLY_FLAGS כדי לגבור על
+            // המתג בטופס, שאינו יודע שנקבעה עכשיו סיסמה
+            customer.isRegistered = true;
+          }
+        }
 
         if (req.body.welcomeGift?.isUsed !== undefined) {
           customer.set("welcomeGift.isUsed", !!req.body.welcomeGift.isUsed);
@@ -1293,7 +1372,6 @@ const updateCustomer = async (req, res) => {
         }
       }
 
-      // customer.password = bcrypt.hashSync("12345678");
       const updatedUser = await customer.save();
       // הטוקן נועד לרענן את החיבור של הלקוח בחנות אחרי עדכון הפרופיל. איש צוות
       // שעורך לקוח אחר אינו זקוק לו, ואין סיבה להנפיק לו טוקן התחברות של הלקוח
