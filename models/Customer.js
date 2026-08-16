@@ -75,6 +75,40 @@ const CustomerErpSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// הגדרות החיוב של הלקוח מול iCount. נפרד מ-erp כי אלה החלטות שלנו על אופן
+// החיוב, ולא נתונים שהגיעו מיבוא האקסל — יבוא חוזר לא אמור לדרוס אותן.
+const CustomerBillingSchema = new mongoose.Schema(
+  {
+    // מזהה הלקוח בצד של iCount. נשמר כדי לחסוך חיפוש בכל הפקת מסמך.
+    // ההתאמה עצמה נעשית לפי erp.customerNumber (שנשמר שם כ-custom_client_id),
+    // ולכן השדה הזה הוא מטמון בלבד — אם הוא ריק, מאתרים מחדש ומעדכנים.
+    icountClientId: { type: String, required: false },
+    icountSyncedAt: { type: Date, required: false },
+
+    // האם לפצל את החשבונית החודשית לפי קטגוריה. חלק מהלקוחות (בעיקר גופים
+    // עם תקציבים נפרדים למחלקות) דורשים חשבונית לכל קטגוריה בנפרד.
+    splitInvoiceByCategory: { type: Boolean, default: false },
+
+    // אופן החיוב:
+    //
+    //   monthly     — ברירת המחדל. כל משלוח מייצר תעודת משלוח, ובסוף החודש
+    //                 כל התעודות נסגרות לחשבונית אחת.
+    //   perDelivery — חשבונית מס מופקת מיד עם כל משלוח, והיא מה שנמסר
+    //                 ללקוח במקום תעודת משלוח.
+    //
+    // גם ב-perDelivery נשמרת תעודה פנימית: היא צילום המצב שממנו נבנית
+    // החשבונית, וכל הדיווח ("מה נמסר", "מה חויב") נשען עליה. ההבדל הוא
+    // שהיא נסגרת מיד ולא ממתינה לסוף החודש, ושהמסמך שמודפס ללקוח הוא
+    // החשבונית.
+    mode: {
+      type: String,
+      enum: ["monthly", "perDelivery"],
+      default: "monthly",
+    },
+  },
+  { _id: false }
+);
+
 const customerSchema = new mongoose.Schema(
   {
     name: {
@@ -191,6 +225,12 @@ const customerSchema = new mongoose.Schema(
       type: CustomerErpSchema,
       required: false,
       select: false,
+    },
+
+    // הגדרות החיוב מול iCount
+    billing: {
+      type: CustomerBillingSchema,
+      required: false,
     },
   },
   {

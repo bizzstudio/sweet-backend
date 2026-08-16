@@ -29,6 +29,8 @@ const cashierOrderRoutes = require("../routes/cashierOrderRoutes");
 const incomingOrderRoutes = require("../routes/incomingOrderRoutes");
 const blogRoutes = require("../routes/blogRoutes");
 const lotteryRoutes = require("../routes/lotteryRoutes");
+const billingRoutes = require("../routes/billingRoutes");
+const monthEndCron = require("../lib/billing/monthEndCron");
 const { getActiveLottery } = require("../controller/lotteryController");
 
 const { isAuth, isAdmin, isApp, loginApp } = require("../config/auth");
@@ -113,6 +115,12 @@ app.use('/api/deliveries', deliveryRoutes);
 app.use('/api/popup', popupRoutes);
 app.use('/api/message', messageRoutes);
 app.use("/api/blog/", blogRoutes);
+// חיוב: תעודות משלוח, סגירת חודש והפקת מסמכים ב-iCount. ההגנה היא isAdmin
+// בתוך הראוטר עצמו ולא כאן, כדי שכל מסלול יהיה מסומן במפורש.
+app.use("/api/billing/", billingRoutes);
+// סגירת חודש אוטומטית: ביום האחרון של החודש ב-23:00 (שעון ישראל) מופקות
+// חשבוניות מס ב-iCount ונשלח מייל סיכום. כיבוי: BILLING_AUTO_CLOSE=false.
+monthEndCron.register();
 
 //login a admin
 app.post("/api/admin/login", loginAdmin);

@@ -6,6 +6,7 @@ const {
   importProducts,
   checkImportProducts,
   getAllProducts,
+  getProductsLite,
   getShowingProducts,
   getCartProducts,
   getProductById,
@@ -31,6 +32,9 @@ router.post("/import/check", isAdmin, checkImportProducts);
 
 // יבוא/עדכון מוצרים מאקסל לפי מק"ט - חייב להיות לפני "/:id"
 router.post("/import", isAdmin, importProducts);
+
+// רשימת קטלוג רזה לבוררי מוצרים - לפני "/:id" כדי ש-"lite" לא ייחשב ל-id
+router.get("/lite", isAdmin, getProductsLite);
 
 // get a product
 router.post("/:id", getProductById);

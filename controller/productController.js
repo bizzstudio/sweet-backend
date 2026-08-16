@@ -923,6 +923,39 @@ const getAllProducts = async (req, res) => {
   }
 };
 
+// רשימת קטלוג רזה לבוררי מוצרים (הצעות מחיר, מחירונים).
+// getAllProducts מחזיר את המסמך המלא — תמונות, תיאורים, וריאציות — וזה
+// מיותר ואיטי כשצריך רק לבחור מק"ט מתוך 4,320 מוצרים. כאן חוזרים רק שלושת
+// השדות שהבורר מציג, ללא דפדוף, כדי שהחיפוש יתבצע בדפדפן (כ-320KB).
+//
+// אין סינון לפי status: כל הקטלוג מוסתר כרגע בחזית, והצעת מחיר אינה תלויה
+// בכך. גם isStoreProduct לא מסונן, כדי שהבורר יציע בדיוק את מה שהתמחור
+// (lib/billing/pricing) יודע לתמחר.
+const getProductsLite = async (req, res) => {
+  try {
+    const products = await Product.find({
+      sku: { $exists: true, $nin: [null, ""] },
+    })
+      .select("sku title prices.price")
+      .lean();
+
+    // Collator אחד לכל המיון; localeCompare לכל השוואה בונה אותו מחדש
+    const collator = new Intl.Collator("he");
+    const items = products
+      .map((p) => ({
+        sku: String(p.sku),
+        name: p.title?.he || p.title?.en || String(p.sku),
+        price: Number(p.prices?.price) || 0,
+      }))
+      .sort((a, b) => collator.compare(a.name, b.name));
+
+    res.send({ products: items, total: items.length });
+  } catch (err) {
+    console.log("getProductsLite error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
 const getProductBySlug = async (req, res) => {
   // console.log("slug", req.params.slug);
   try {
@@ -1454,6 +1487,7 @@ module.exports = {
   importProducts,
   checkImportProducts,
   getAllProducts,
+  getProductsLite,
   getShowingProducts,
   getCartProducts,
   getFacebookFeedCSV,

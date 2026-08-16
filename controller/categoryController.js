@@ -219,6 +219,13 @@ const updateCategory = async (req, res) => {
         : category.parentId;
       category.parentName = req.body.parentName;
 
+      // סחורה נשקלת. רק כשהשדה נשלח במפורש — טופס ישן שלא מכיר אותו אסור
+      // שיאפס בשקט את הסימון על "פירות וירקות", כי אז הפירות היו חוזרים
+      // לתעודה האוטומטית ולחיוב לפי משקל מוזמן
+      if (req.body.requiresManualNote !== undefined) {
+        category.requiresManualNote = Boolean(req.body.requiresManualNote);
+      }
+
       // slug validation (if provided, must be unique across others)
       if (req.body.slug && req.body.slug !== category.slug) {
         const exists = await Category.findOne({ slug: req.body.slug, _id: { $ne: category._id } });

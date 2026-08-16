@@ -1315,9 +1315,20 @@ const updateCustomer = async (req, res) => {
       // בשדות האלה - עדכון פרופיל רגיל מהחנות לא משלם עליה
       const touchesStaffFields =
         req.body.erp !== undefined ||
+        req.body.billing !== undefined ||
         req.body.welcomeGift !== undefined ||
         req.body.password !== undefined ||
         STAFF_ONLY_FLAGS.some((flag) => req.body[flag] !== undefined);
+
+      // הגדרות החיוב נדחות במפורש למי שאינו מורשה, ולא נבלעות בשקט.
+      // הבליעה השקטה (ההתנהגות של שאר השדות כאן) גורמת למסך להציג
+      // "נשמר" כשלא נשמר כלום — ובהגדרה שקובעת איך הלקוח מחויב, פער
+      // בין מה שרואים למה שקיים הוא בדיוק סוג הטעות שמגיעה לחשבונית.
+      if (req.body.billing !== undefined && !(await isCustomerManager(req?.user))) {
+        return res.status(403).send({
+          message: "אין לך הרשאה לשנות את הגדרות החיוב של הלקוח.",
+        });
+      }
 
       if (touchesStaffFields && (await isCustomerManager(req?.user))) {
         STAFF_ONLY_FLAGS.forEach((flag) => {
@@ -1370,6 +1381,29 @@ const updateCustomer = async (req, res) => {
             customer.erp[field] = value === "" ? null : value;
           });
         }
+
+        // הגדרות החיוב. רק splitInvoiceByCategory ניתן לעריכה מהפאנל —
+        // icountClientId נכתב על ידי הסנכרון בלבד, ומסך שהיה דורס אותו
+        // בערך ישן היה גורם ליצירת כרטיס לקוח כפול ב-iCount.
+        if (req.body.billing?.splitInvoiceByCategory !== undefined) {
+          customer.set(
+            "billing.splitInvoiceByCategory",
+            !!req.body.billing.splitInvoiceByCategory
+          );
+        }
+
+        // מסלול החיוב. ערך לא מוכר נדחה במפורש ולא נשמר כברירת מחדל —
+        // לקוח שאמור לקבל חשבונית מיד ונשמר בטעות כחודשי יגלה את זה רק
+        // בסוף החודש.
+        if (req.body.billing?.mode !== undefined) {
+          const mode = String(req.body.billing.mode);
+          if (!["monthly", "perDelivery"].includes(mode)) {
+            return res.status(400).send({
+              message: `מסלול חיוב לא מוכר: "${mode}". אפשרויות: monthly, perDelivery`,
+            });
+          }
+          customer.set("billing.mode", mode);
+        }
       }
 
       const updatedUser = await customer.save();
@@ -1388,6 +1422,7 @@ const updateCustomer = async (req, res) => {
         city: updatedUser.city,
         isCashier: updatedUser.isCashier,
         welcomeGift: updatedUser.welcomeGift,
+        billing: updatedUser.billing,
         message: "Customer Updated Successfully!",
       });
     } else {
