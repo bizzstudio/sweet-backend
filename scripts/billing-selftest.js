@@ -61,7 +61,9 @@ const cleanup = async () => {
   await Quote.deleteMany({ createdBy: TAG });
   // ההזמנה הסינתטית של בדיקת הסנכרון. הבדיקה עורכת את העגלה שלה, ולכן
   // היא חייבת להיות הזמנה משלה — עריכה של הזמנה אמיתית הייתה משנה חיוב.
-  await Order.deleteMany({ systemNote: TAG });
+  // regex ולא השוואה מדויקת: editOrderItems מוסיף שורת תיעוד ל-systemNote,
+  // והזמנת בדיקה שנערכה הייתה נשארת במסד אחרי ניקוי לפי ערך מדויק
+  await Order.deleteMany({ systemNote: { $regex: `^${TAG}` } });
   // הקטגוריות הזמניות של בדיקת הסחורה הנשקלת. חייבות להימחק — קטגוריה
   // מסומנת שנשארה במסד הייתה מוציאה מוצרים מהתעודה האוטומטית בייצור
   await Category.deleteMany({ slug: { $regex: `^${TAG.toLowerCase()}-` } });
@@ -719,6 +721,174 @@ const cleanup = async () => {
     (await noteNow()).billing.cancelledBySync === false,
     "בלי האיפוס התעודה הייתה קמה לתחייה בעריכת ההזמנה הבאה"
   );
+
+  // ─────────────────────────────────────────────────────────────────
+  group("עריכת פריטי ההזמנה מהפאנל");
+
+  const { editOrderItems } = require("../lib/orders/editItems");
+
+  const editOrder = await Order.create({
+    ...src,
+    _id: undefined,
+    invoice: undefined,
+    systemNote: TAG,
+    discount: 0,
+    offerDiscount: 0,
+    shippingCost: 0,
+    cart: src.cart.slice(0, 2),
+  });
+  const { note: editNote } = await createFromOrder(editOrder._id, { issuedBy: TAG });
+  const editNoteNow = () => DeliveryNote.findById(editNote._id).lean();
+  const editOrderNow = () => Order.findById(editOrder._id).lean();
+
+  const keptId = String(editOrder.cart[0]._id);
+  const droppedId = String(editOrder.cart[1]._id);
+  const totalBeforeEdit = editOrder.total;
+
+  // 1. שינוי כמות — התרחיש שבגללו המסך נבנה: כמות שנקלטה שגוי מהמייל
+  const bumped = await editOrderItems(editOrder._id, {
+    items: [
+      { _id: keptId, quantity: Number(editOrder.cart[0].quantity) + 2 },
+      { _id: droppedId, quantity: Number(editOrder.cart[1].quantity) },
+    ],
+    changedBy: TAG,
+  });
+  check("שינוי כמות מעלה את סכום ההזמנה", bumped.totals.total > totalBeforeEdit,
+    `לפני ${totalBeforeEdit}, אחרי ${bumped.totals.total}`);
+  check("הסנכרון לתעודה מוחזר בתשובה ולא רק רץ ברקע", bumped.note !== null);
+  check("שורת תיעוד נכתבת ל-systemNote",
+    (await editOrderNow()).systemNote.includes("עריכת פריטים"));
+
+  // 2. הסרת פריט — הבקשה נושאת את מה שנשאר, ומה שאינו בה יורד
+  const trimmed = await editOrderItems(editOrder._id, {
+    items: [{ _id: keptId, quantity: 1 }],
+    changedBy: TAG,
+  });
+  check("פריט שלא נשלח בבקשה יורד מההזמנה", (await editOrderNow()).cart.length === 1);
+  check("והסכום חושב מחדש לפי מה שנשאר", trimmed.totals.total < bumped.totals.total);
+
+  // 3. הוספת מוצר — המחיר נקבע בשרת (מחירון הלקוח, ואם אין — קטלוג)
+  const spare = await Product.findOne({
+    sku: { $exists: true, $nin: [null, ""] },
+    "prices.price": { $gt: 0 },
+    _id: { $ne: editOrder.cart[0]._id },
+  })
+    .select("sku")
+    .lean();
+
+  const grown = await editOrderItems(editOrder._id, {
+    items: [
+      { _id: keptId, quantity: 1 },
+      { sku: String(spare.sku), quantity: 2 },
+    ],
+    changedBy: TAG,
+  });
+  const grownOrder = await editOrderNow();
+  check("הוספת מוצר לפי מק\"ט מוסיפה שורה", grownOrder.cart.length === 2);
+  check("והשורה החדשה נושאת מחיר", grown.totals.subTotal > trimmed.totals.subTotal);
+
+  // 4. מה שנחסם
+  const editRejects = async (label, input, expect) => {
+    let err = null;
+    try {
+      await editOrderItems(editOrder._id, input);
+    } catch (e) {
+      err = e;
+    }
+    check(label, err !== null && expect(err), err ? err.message : "לא נזרקה שגיאה");
+  };
+
+  await editRejects("הזמנה בלי פריטים נחסמת", { items: [] }, (e) => e.status === 400);
+  await editRejects(
+    "כמות אפס נחסמת",
+    { items: [{ _id: keptId, quantity: 0 }] },
+    (e) => e.status === 400
+  );
+  await editRejects(
+    'מק"ט שאינו בקטלוג נחסם',
+    { items: [{ sku: "אין-כזה-מקט", quantity: 1 }] },
+    (e) => e.status === 400
+  );
+  await editRejects(
+    "אותו מוצר פעמיים נחסם",
+    { items: [{ _id: keptId, quantity: 1 }, { _id: keptId, quantity: 2 }] },
+    (e) => e.status === 400
+  );
+  await editRejects(
+    "הנחה גדולה מסכום השורות נחסמת",
+    { items: [{ _id: keptId, quantity: 1 }], discount: 999999 },
+    (e) => e.status === 400
+  );
+
+  await editRejects(
+    "בקשה עם יותר מדי שורות נחסמת",
+    { items: Array.from({ length: 301 }, () => ({ _id: keptId, quantity: 1 })) },
+    (e) => e.status === 400
+  );
+
+  // 4ב. נעילה אופטימית — מסך שנטען לפני שינוי אחר אינו דורס אותו
+  await editRejects(
+    "עריכה ממסך שאינו מעודכן נחסמת",
+    { items: [{ _id: keptId, quantity: 1 }], expectedUpdatedAt: new Date(0) },
+    (e) => e.status === 409 && e.code === "STALE_ORDER"
+  );
+  const fresh = await editOrderNow();
+  const onTime = await editOrderItems(editOrder._id, {
+    items: [{ _id: keptId, quantity: 1 }],
+    expectedUpdatedAt: fresh.updatedAt,
+    changedBy: TAG,
+  });
+  check("ועם החותמת הנכונה עוברת", onTime.totals.total > 0);
+
+  // 4ג. שורה שנוצרה על ידי קופון אינה מחויבת ואינה נמחקת
+  const freeLine = {
+    ...fresh.cart[0],
+    isCouponFreeProduct: true,
+    quantity: 1,
+  };
+  await Order.updateOne({ _id: editOrder._id }, { $push: { cart: freeLine } });
+
+  const withFree = await editOrderItems(editOrder._id, {
+    items: [{ _id: keptId, quantity: 1 }],
+    changedBy: TAG,
+  });
+  const freeCart = (await editOrderNow()).cart;
+  check(
+    "מוצר חינם מקופון נשמר בעגלה",
+    freeCart.some((l) => l.isCouponFreeProduct),
+    "החישוב מחדש היה מפיל אותו"
+  );
+  check(
+    "ואינו מחויב בסכום ההזמנה",
+    withFree.totals.subTotal ===
+      Number((Number(fresh.cart[0].prices?.price ?? fresh.cart[0].price) || 0).toFixed(2)),
+    `subTotal=${withFree.totals.subTotal}`
+  );
+
+  // 5. תעודה שחויבה — עריכה נחסמת עד לאישור מפורש, וגם אז אינה נוגעת בתעודה
+  await DeliveryNote.updateOne(
+    { _id: editNote._id },
+    { $set: { "billing.status": "billed", "billing.icountDocNum": 1 } }
+  );
+  await editRejects(
+    "עריכה נחסמת כשהתעודה כבר חויבה",
+    { items: [{ _id: keptId, quantity: 4 }] },
+    (e) => e.status === 409 && e.code === "NOTE_LOCKED"
+  );
+
+  const billedNoteTotal = (await editNoteNow()).total;
+  const forced = await editOrderItems(editOrder._id, {
+    items: [{ _id: keptId, quantity: 4 }],
+    allowLockedNote: true,
+    changedBy: TAG,
+  });
+  check("אישור מפורש מעדכן את ההזמנה", (await editOrderNow()).cart[0].quantity === 4);
+  check(
+    "אבל התעודה שחויבה נשארת כשהייתה",
+    (await editNoteNow()).total === billedNoteTotal,
+    "תיקון חיוב נעשה בחשבונית זיכוי, לא בדריסת התעודה"
+  );
+  check("והתשובה מדווחת שהתעודה לא עודכנה", forced.note?.updated === false);
 
   // ─────────────────────────────────────────────────────────────────
   group("תעודת משלוח ידנית — המשקל שנשקל בפועל");

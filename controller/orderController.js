@@ -20,6 +20,7 @@ const { whatsappErrorEmailBody } = require('../lib/email-sender/templates/whatsa
 const { handleProductQuantity } = require('../lib/stock-controller/others');
 const { getIngestionErrorStatusId } = require('../utils/ingestionStatus');
 const Offer = require("../models/Offer");
+const { editOrderItems, OrderEditError } = require("../lib/orders/editItems");
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
@@ -2000,11 +2001,54 @@ const rateOrdersOneTime = async (ordersInvoices = [{ invoice: Number, rate: Numb
 //   ]);
 // }, 5000);
 
+// PUT /api/orders/:id/items — עריכת שורות ההזמנה מהפאנל.
+//
+// נפרד מ-updateOrder בכוונה: זה מסלול הסטטוס, והוא מוגן בסיסמה משותפת
+// שאין לה קשר לתוכן ההזמנה. הלוגיקה עצמה יושבת ב-lib/orders/editItems כדי
+// שסקריפט תיקון יוכל לקרוא לה בלי לעבור דרך HTTP.
+const updateOrderItems = async (req, res) => {
+  try {
+    const result = await editOrderItems(req.params.id, {
+      items: req.body?.items,
+      shippingCost: req.body?.shippingCost,
+      discount: req.body?.discount,
+      allowLockedNote: req.body?.allowLockedNote === true,
+      expectedUpdatedAt: req.body?.expectedUpdatedAt,
+      // req.user נקבע ב-isAdmin, ולא נלקח מגוף הבקשה: שורת התיעוד ב-systemNote
+      // צריכה לומר מי באמת ביצע. המייל ולא השם, כי שם המנהל הוא לעיתים
+      // אובייקט רב-לשוני
+      changedBy: req.user?.email || undefined,
+    });
+
+    res.status(200).send({
+      message: "שורות ההזמנה עודכנו",
+      order: result.order,
+      changes: result.changes,
+      totals: result.totals,
+      note: result.note,
+    });
+  } catch (err) {
+    if (err instanceof OrderEditError) {
+      // code ו-noteNumber נשלחים כדי שהפאנל יוכל להציג אישור ממוקד
+      // ("התעודה כבר חויבה — לעדכן בכל זאת?") ולא רק הודעת שגיאה
+      return res.status(err.status).send({
+        message: err.message,
+        code: err.code,
+        noteNumber: err.noteNumber,
+        noteStatus: err.noteStatus,
+      });
+    }
+    console.error("updateOrderItems error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
 module.exports = {
   getAllOrders,
   getOrderById,
   getOrderCustomer,
   updateOrder,
+  updateOrderItems,
   updateOrderWebHook,
   deleteOrder,
   bestSellerProductChart,

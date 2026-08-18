@@ -5,6 +5,7 @@ const {
   getOrderById,
   getOrderCustomer,
   updateOrder,
+  updateOrderItems,
   deleteOrder,
   bestSellerProductChart,
   getDashboardOrders,
@@ -49,6 +50,10 @@ router.get("/customer/:id", isAdmin, getOrderCustomer);
 
 // get a order by id
 router.get("/:id", isAdmin, getOrderById);
+
+// עריכת שורות ההזמנה — לפני "/:id" אינו נדרש (נתיב באורך אחר), אבל
+// נשמר לידו כדי ששני מסלולי העדכון יישבו במקום אחד
+router.put("/:id/items", isAdmin, updateOrderItems);
 
 // update a order
 router.put("/:id", isAdmin, updateOrder);

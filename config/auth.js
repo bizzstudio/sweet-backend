@@ -180,7 +180,10 @@ const isWhatsappServer = async (req, res, next) => {
     if (authorization) {
       const token = authorization.split(" ")[1];
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      if (decoded.role === "Admin" || decoded.role === "CEO") {
+      // "Super Admin" חייב להיכלל — זה תפקיד ברירת המחדל של המשתמש שנוצר
+      // ב-script/create-admin.js וב-script/init-db.js. אותה רשימה כמו
+      // CUSTOMER_MANAGER_ROLES ב-customerController.
+      if (["Admin", "Super Admin", "CEO"].includes(decoded.role)) {
         // המשתמש הוא אדמין, מאפשר להמשיך
         req.user = decoded;
         return next();
