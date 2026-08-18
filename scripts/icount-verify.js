@@ -92,19 +92,19 @@ const caution = (s) => { warnings++; console.log(warn(s)); };
 
   // בדיקה התנהגותית ולא חיפוש מחרוזת בקובץ: מוודאת שהפונקציה באמת מזהה
   // את הסטטוסים הנכונים ודוחה את השאר, ושהיא באמת מחוברת ל-logStatusChange.
-  const { isDeliveredStatus } = require("../lib/billing/autoDeliveryNote");
-  const triggers = ["Delivered", "delivered", "נמסר", "סופק"];
-  const nonTriggers = ["Processing", "Likut", "Pending", "Cancel", "", null];
+  const { isNoteTriggerStatus } = require("../lib/billing/autoDeliveryNote");
+  const triggers = ["Processing", "processing", "טופלה", "בטיפול", "Delivered", "נמסר"];
+  const nonTriggers = ["Likut", "Pending", "Cancel", "IngestionError", "", null];
 
-  const triggersOk = triggers.every((s) => isDeliveredStatus(s));
-  const nonTriggersOk = nonTriggers.every((s) => !isDeliveredStatus(s));
+  const triggersOk = triggers.every((s) => isNoteTriggerStatus(s));
+  const nonTriggersOk = nonTriggers.every((s) => !isNoteTriggerStatus(s));
 
   const hooked = require("fs")
     .readFileSync(require("path").join(__dirname, "../utils/logStatusChange.js"), "utf8")
     .includes("autoDeliveryNote");
 
   if (triggersOk && nonTriggersOk && hooked) {
-    console.log(ok("תעודה נוצרת אוטומטית במעבר לסטטוס נמסר (מחובר ב-logStatusChange)"));
+    console.log(ok('תעודה נוצרת אוטומטית במעבר ל"טופלה" (מחובר ב-logStatusChange)'));
   } else if (!hooked) {
     fail("ההפעלה האוטומטית אינה מחוברת ל-logStatusChange — התעודה תיווצר רק ידנית");
   } else {
@@ -148,6 +148,29 @@ const caution = (s) => { warnings++; console.log(warn(s)); };
     );
   } else {
     console.log(ok("סגירה אוטומטית מכובה (BILLING_AUTO_CLOSE=false) — הפקה ידנית בלבד"));
+  }
+
+  // שליחת המסמכים ללקוח. חשבונית שלא נשלחה קיימת רק ב-iCount, ולכן מספר
+  // הלקוחות בלי כתובת תקינה הוא נתון תפעולי ולא הערת שוליים.
+  const emailsOn = String(process.env.BILLING_EMAIL_DOCUMENTS ?? "true").toLowerCase() !== "false";
+  if (emailsOn) {
+    console.log(ok("כל מסמך מס נשלח ללקוח במייל עם ההפקה (BILLING_EMAIL_DOCUMENTS)"));
+
+    const { billingEmailOf, isDeliverableEmail } = require("../lib/icount/clients");
+    // billing חייב להיכלל: כתובת ייעודית לחשבוניות יושבת ב-billing.invoiceEmail,
+    // ובלעדיה הספירה כאן הייתה מדווחת "אין מייל" ללקוחות שדווקא יש להם
+    const all = await Customer.find({}).select("+erp email billing").lean();
+    const missing = all.filter((c) => !isDeliverableEmail(billingEmailOf(c))).length;
+
+    console.log(`     לקוחות עם מייל שאפשר לשלוח אליו: ${all.length - missing} מתוך ${all.length}`);
+    if (missing) {
+      caution(
+        `${missing} לקוחות בלי כתובת מייל תקינה — החשבונית שלהם תופק אך לא תישלח.\n` +
+          "      הרשימה המלאה: node scripts/billing-email-audit.js"
+      );
+    }
+  } else {
+    console.log(ok("שליחת מסמכים במייל מכובה (BILLING_EMAIL_DOCUMENTS=false)"));
   }
 
   // ── 4 ─────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ const Order = require("../models/Order");
 const Status = require("../models/Status");
 const Delivery = require('../models/Delivery');
 const Customer = require("../models/Customer");
+const DeliveryNote = require("../models/DeliveryNote");
 const { default: axios } = require('axios');
 const logStatusChange = require('../utils/logStatusChange');
 const cron = require('node-cron');
@@ -1006,9 +1007,48 @@ const updateOrderWebHook = async (req, res) => {
   }
 };
 
+// מחיקת הזמנה, עם שמירה על שרשרת החיוב.
+//
+// מאז שתעודת המשלוח נוצרת בקליטת ההזמנה יש תעודה ל**כל** הזמנה, ולא רק
+// לזו שנמסרה. מחיקה בלי בדיקה הייתה משאירה תעודה שמצביעה על הזמנה שאינה
+// קיימת — ואם התעודה כבר חויבה, גם חשבונית מס ב-iCount שאי אפשר להסביר.
+//
+// לכן: תעודה שחויבה או שנתפסה לחיוב חוסמת את המחיקה, ותעודה ידנית חוסמת
+// גם היא — היא נושאת שקילות שהוקלדו ביד ואין מהיכן לשחזר אותן. תעודה
+// אוטומטית שטרם חויבה נמחקת יחד עם ההזמנה, כי בלעדיה אין לה משמעות.
 const deleteOrder = async (req, res) => {
   try {
-    await Order.deleteOne({ _id: req.params.id });
+    const notes = await DeliveryNote.find({ order: req.params.id })
+      .select("number kind billing.status")
+      .lean();
+
+    const blocking = notes.filter(
+      (n) => ["billed", "billing"].includes(n.billing?.status) || n.kind === "manual"
+    );
+
+    if (blocking.length) {
+      return res.status(409).send({
+        message: {
+          he:
+            `לא ניתן למחוק — להזמנה יש תעודות משלוח: ` +
+            `${blocking.map((n) => n.number).join(", ")}. ` +
+            `תעודה שחויבה מתוקנת בחשבונית זיכוי, ותעודה ידנית יש לבטל תחילה.`,
+          en: "Order has delivery notes that were billed or entered manually",
+        },
+      });
+    }
+
+    // התעודות לפני ההזמנה: אם המחיקה תיפול באמצע, תעודה יתומה גרועה
+    // פחות מהזמנה בלי התעודה שמתארת אותה
+    if (notes.length) {
+      await DeliveryNote.deleteMany({ _id: { $in: notes.map((n) => n._id) } });
+    }
+
+    const result = await Order.deleteOne({ _id: req.params.id });
+    if (!result.deletedCount) {
+      return res.status(404).send({ message: "Order not found" });
+    }
+
     res.status(200).send({
       message: "Order Deleted Successfully!",
     });

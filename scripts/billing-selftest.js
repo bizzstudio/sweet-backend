@@ -5,6 +5,12 @@
 //
 //   node scripts/billing-selftest.js
 
+// ICOUNT_MODE נקבע כאן ולא נלקח מ-.env: הבדיקות האלה מאמתות את הזרימה
+// האמיתית, ולכן חייבות לרוץ ב-live גם כשהשרת מחובר כרגע לחשבון דמו.
+// dotenv אינו דורס ערך קיים, ולכן ההשמה הזאת מנצחת. את מצב הדמו בודק
+// scripts/billing-demo-test.js.
+process.env.ICOUNT_MODE = "live";
+
 require("dotenv").config();
 const mongoose = require("mongoose");
 
@@ -16,14 +22,19 @@ const Customer = require("../models/Customer");
 const Category = require("../models/Category");
 const Product = require("../models/Product");
 
-const { createFromOrder, createManual, billingMonthOf } = require("../lib/billing/deliveryNotes");
+const {
+  createFromOrder,
+  syncFromOrder,
+  createManual,
+  billingMonthOf,
+} = require("../lib/billing/deliveryNotes");
 const {
   splitByNoteKind,
   manualNoteCategoryIds,
   clearCache: clearManualCache,
 } = require("../lib/billing/manualItems");
 const { groupIntoInvoices, previousMonth, isLastDayOfMonth, releaseStuckClaims, closeMonth, billNoteImmediately } = require("../lib/billing/monthlyBilling");
-const { isDeliveredStatus } = require("../lib/billing/autoDeliveryNote");
+const { isNoteTriggerStatus } = require("../lib/billing/autoDeliveryNote");
 const { dueDateFor, forCustomer } = require("../lib/billing/paymentTerms");
 const { priceItemsForCustomer, priceQuality } = require("../lib/billing/pricing");
 const { listInvoices } = require("../lib/billing/invoices");
@@ -48,6 +59,9 @@ const group = (t) => console.log(`\n── ${t} ${"─".repeat(Math.max(0, 56 - 
 const cleanup = async () => {
   await DeliveryNote.deleteMany({ issuedBy: TAG });
   await Quote.deleteMany({ createdBy: TAG });
+  // ההזמנה הסינתטית של בדיקת הסנכרון. הבדיקה עורכת את העגלה שלה, ולכן
+  // היא חייבת להיות הזמנה משלה — עריכה של הזמנה אמיתית הייתה משנה חיוב.
+  await Order.deleteMany({ systemNote: TAG });
   // הקטגוריות הזמניות של בדיקת הסחורה הנשקלת. חייבות להימחק — קטגוריה
   // מסומנת שנשארה במסד הייתה מוציאה מוצרים מהתעודה האוטומטית בייצור
   await Category.deleteMany({ slug: { $regex: `^${TAG.toLowerCase()}-` } });
@@ -85,16 +99,22 @@ const cleanup = async () => {
   check("01/09 00:30 שעון ישראל אינו האחרון", !isLastDayOfMonth(new Date("2026-08-31T21:30:00Z")));
 
   // ─────────────────────────────────────────────────────────────────
-  group("זיהוי סטטוס נמסר");
+  group("זיהוי הסטטוס שמפיק תעודה");
 
-  check("Delivered מפעיל", isDeliveredStatus("Delivered"));
-  check("delivered (אותיות קטנות) מפעיל", isDeliveredStatus("delivered"));
-  check("'נמסר' מפעיל", isDeliveredStatus("נמסר"));
-  check("רווחים מסביב לא שוברים", isDeliveredStatus("  Delivered  "));
-  check("Processing לא מפעיל", !isDeliveredStatus("Processing"));
-  check("null לא מפעיל", !isDeliveredStatus(null));
-  check("undefined לא מפעיל", !isDeliveredStatus(undefined));
-  check("מחרוזת ריקה לא מפעילה", !isDeliveredStatus(""));
+  check("Processing מפעיל", isNoteTriggerStatus("Processing"));
+  check("'טופלה' מפעיל", isNoteTriggerStatus("טופלה"));
+  check("'בטיפול' (השם הישן) מפעיל", isNoteTriggerStatus("בטיפול"));
+  check("processing (אותיות קטנות) מפעיל", isNoteTriggerStatus("processing"));
+  check("רווחים מסביב לא שוברים", isNoteTriggerStatus("  Processing  "));
+  // הסטטוס כובה בפאנל, אבל הזמנה היסטורית שתסומן כך ידנית עדיין צריכה תעודה
+  check("Delivered עדיין מפעיל", isNoteTriggerStatus("Delivered"));
+  check("'נמסר' עדיין מפעיל", isNoteTriggerStatus("נמסר"));
+  check("Likut לא מפעיל", !isNoteTriggerStatus("Likut"));
+  check("Pending לא מפעיל", !isNoteTriggerStatus("Pending"));
+  check("Cancel לא מפעיל", !isNoteTriggerStatus("Cancel"));
+  check("null לא מפעיל", !isNoteTriggerStatus(null));
+  check("undefined לא מפעיל", !isNoteTriggerStatus(undefined));
+  check("מחרוזת ריקה לא מפעילה", !isNoteTriggerStatus(""));
 
   // ─────────────────────────────────────────────────────────────────
   group("פיצול לפי קטגוריה");
@@ -198,21 +218,58 @@ const cleanup = async () => {
     }
   };
 
+  // הבדיקות כאן נוגעות בהגנת החודש, ולכן כולן חייבות להיות על מקרים
+  // שנדחים או על dryRun. מקרה *שעובר* בלי dryRun היה מפיק חשבוניות מס
+  // אמיתיות ב-iCount, וזה בדיוק מה שהבדיקות אמורות לא לעשות.
   const current = billingMonthOf(new Date());
-  check("חודש נוכחי נדחה", await rejects(() => closeMonth({ month: current, dryRun: true })));
 
-  // הסגירה האוטומטית מותרת רק ביום האחרון, ולכן התוצאה הנכונה תלויה
-  // בתאריך שבו הבדיקה רצה
-  const closingDay = isLastDayOfMonth();
-  const currentWithFlag = await rejects(() =>
-    closeMonth({ month: current, dryRun: true, allowCurrentMonth: true })
+  // תצוגה מקדימה על החודש הרץ היא הדרך לראות מה פתוח כרגע, ואינה מפיקה
+  // דבר — ולכן היא מותרת
+  check(
+    "תצוגה מקדימה של החודש הנוכחי מתקבלת",
+    !(await rejects(() => closeMonth({ month: current, dryRun: true })))
   );
   check(
-    closingDay
-      ? "ביום האחרון — הסגירה האוטומטית מקבלת את החודש הנוכחי"
-      : "לא היום האחרון — allowCurrentMonth לבדו אינו פותח את החודש הנוכחי",
-    closingDay ? !currentWithFlag : currentWithFlag
+    "סגירה גורפת של החודש הנוכחי נדחית",
+    await rejects(() => closeMonth({ month: current })),
+    "ההגנה על חודש שעדיין רץ"
   );
+
+  // הפקה ידנית ללקוח בודד פותחת את החודש הרץ. הלקוח כאן אינו קיים, ולכן
+  // אין לו תעודות פתוחות והקריאה מסתיימת בלי לפנות ל-iCount.
+  //
+  // הבדיקה היא שהגנת החודש לא ירתה, ולא שהקריאה הצליחה: בסביבת דמו
+  // assertNotDemo יעצור אותה מסיבה אחרת לגמרי, וזו אינה כשלון.
+  const monthGuardFired = async (fn) => {
+    try {
+      await fn();
+      return false;
+    } catch (err) {
+      return err.message.includes("טרם הסתיים") || err.message.includes("טרם התחיל");
+    }
+  };
+
+  const ghostCustomer = new mongoose.Types.ObjectId().toString();
+  check(
+    "לקוח בודד פותח את החודש הנוכחי להפקה",
+    !(await monthGuardFired(() => closeMonth({ month: current, customerId: ghostCustomer })))
+  );
+  check(
+    "בחירת תעודות בלי לקוח נדחית",
+    await rejects(() => closeMonth({ month: previousMonth(), dryRun: true, noteIds: [ghostCustomer] }))
+  );
+
+  // הסגירה האוטומטית מותרת רק ביום האחרון. ביום האחרון עצמו אי אפשר
+  // לבדוק את הצד המתיר — הוא היה מפיק חשבוניות — ולכן נבדק רק הצד החוסם.
+  const closingDay = isLastDayOfMonth();
+  if (closingDay) {
+    console.log("      (היום האחרון בחודש — הצד המתיר של allowCurrentMonth אינו נבדק בכוונה)");
+  } else {
+    check(
+      "לא היום האחרון — allowCurrentMonth לבדו אינו פותח את החודש הנוכחי",
+      await rejects(() => closeMonth({ month: current, allowCurrentMonth: true }))
+    );
+  }
   check(
     "חודש עתידי נדחה גם עם allowCurrentMonth",
     await rejects(() => closeMonth({ month: "2099-01", dryRun: true, allowCurrentMonth: true }))
@@ -495,6 +552,173 @@ const cleanup = async () => {
     "מוצר ששויך גם ל'מבצעים' וגם לירקות חייב להיספר כירק"
   );
   check("אף שורה לא אבדה בפיצול", kindSplit.automatic.length + kindSplit.manual.length === 4);
+
+  // ─────────────────────────────────────────────────────────────────
+  group("התעודה עוקבת אחרי ההזמנה");
+
+  // הזמנה סינתטית משלה: הבדיקה עורכת את העגלה, ועריכה של הזמנה אמיתית
+  // הייתה משנה תעודה וחיוב בייצור. נמחקת ב-cleanup לפי systemNote
+  const src = await Order.findOne({ "cart.1": { $exists: true } }).lean();
+  const syncOrder = await Order.create({
+    ...src,
+    _id: undefined,
+    invoice: undefined,
+    systemNote: TAG,
+    discount: 0,
+    offerDiscount: 0,
+    shippingCost: 0,
+    cart: src.cart.slice(0, 2),
+  });
+
+  const { note: syncNote } = await createFromOrder(syncOrder._id, { issuedBy: TAG });
+  const beforeLines = syncNote.items.length;
+  const beforeTotal = syncNote.total;
+  check("תעודה נוצרה להזמנה הסינתטית", beforeLines >= 1);
+
+  // ה-hook על מודל ההזמנה מסנכרן ברקע ואינו ב-await, כדי לא להאט שמירת
+  // הזמנה. הבדיקה ממתינה לו במקום לקרוא לסנכרון בעצמה — כך נבדק המסלול
+  // האמיתי, זה שרץ בייצור, ולא רק הפונקציה שמתחתיו
+  const settle = () => new Promise((r) => setTimeout(r, 1500));
+  const noteNow = () => DeliveryNote.findById(syncNote._id).lean();
+
+  // 1. שינוי כמות — התרחיש של תיקון בליקוט
+  syncOrder.cart[0].quantity = Number(syncOrder.cart[0].quantity) + 1;
+  syncOrder.markModified("cart");
+  await syncOrder.save();
+  await settle();
+  const afterQty = await noteNow();
+  check(
+    "שינוי כמות בהזמנה מגיע לתעודה מעצמו",
+    afterQty.total > beforeTotal,
+    `לפני ${beforeTotal}, אחרי ${afterQty.total}`
+  );
+
+  // 2. סנכרון חוזר על תעודה שכבר מעודכנת — לא כותב שוב
+  const noChange = await syncFromOrder(syncOrder._id);
+  check("סנכרון בלי שינוי לא כותב", !noChange.changed && noChange.reason === "unchanged");
+
+  // 3. הורדת פריט שהתברר כחסר במלאי
+  syncOrder.cart = syncOrder.cart.slice(0, 1);
+  await syncOrder.save();
+  await settle();
+  check("הורדת פריט יורדת גם מהתעודה", (await noteNow()).items.length === beforeLines - 1);
+
+  // 4. תעודה שחויבה נעולה — מולה עומד מסמך מס ב-iCount
+  await DeliveryNote.updateOne(
+    { _id: syncNote._id },
+    { $set: { "billing.status": "billed", "billing.icountDocNum": 1 } }
+  );
+  const billedTotal = (await noteNow()).total;
+  syncOrder.cart[0].quantity = Number(syncOrder.cart[0].quantity) + 5;
+  syncOrder.markModified("cart");
+  await syncOrder.save();
+  await settle();
+  check("תעודה שחויבה אינה משתנה", (await noteNow()).total === billedTotal);
+  check(
+    "והקריאה הישירה מדווחת על הסיבה",
+    (await syncFromOrder(syncOrder._id)).reason === "billed"
+  );
+
+  // 5. הזמנה שרוקנה — התעודה מבוטלת ולא נמחקת, כדי לא ליצור חור בסדרת המספרים
+  await DeliveryNote.updateOne({ _id: syncNote._id }, { $set: { "billing.status": "open" } });
+  syncOrder.cart = [];
+  await syncOrder.save();
+  await settle();
+  const emptied = await noteNow();
+  check("הזמנה שרוקנה מבטלת את התעודה", emptied.billing.status === "cancelled");
+  check("התעודה עצמה נשארת ומספרה נשמר", emptied.number === syncNote.number);
+
+  // 5ב. ההזמנה התמלאה שוב — התעודה חוזרת לחיים עם אותו מספר
+  syncOrder.cart = src.cart.slice(0, 1);
+  await syncOrder.save();
+  await settle();
+  const revived = await noteNow();
+  check("הזמנה שהתמלאה שוב מחזירה את התעודה לפעילה", revived.billing.status === "open");
+  check("ובאותו מספר תעודה", revived.number === syncNote.number);
+
+  // 5ג. ביטול אנושי אינו מתבטל מעצמו
+  await DeliveryNote.updateOne(
+    { _id: syncNote._id },
+    {
+      $set: { "billing.status": "cancelled", "billing.cancelReason": "החלטה" },
+      $unset: { "billing.cancelledBySync": "" },
+    }
+  );
+  syncOrder.cart = src.cart.slice(0, 2);
+  await syncOrder.save();
+  await settle();
+  check(
+    "ביטול שנעשה בידי אדם נשאר על כנו",
+    (await noteNow()).billing.status === "cancelled",
+    "תעודה שבוטלה במכוון הייתה מחייבת שוב"
+  );
+
+  // 6. הזמנה בלי תעודה — מצב תקין, לא שגיאה
+  const noteless = await Order.create({
+    ...src,
+    _id: undefined,
+    invoice: undefined,
+    systemNote: TAG,
+  });
+  check(
+    "הזמנה בלי תעודה מחזירה noNote",
+    (await syncFromOrder(noteless._id)).reason === "noNote"
+  );
+
+  // 7. עדכון דרך שאילתה — המסלול שעוקף את save לגמרי
+  await DeliveryNote.updateOne(
+    { _id: syncNote._id },
+    {
+      $set: { "billing.status": "open" },
+      $unset: { "billing.cancelReason": "", "billing.cancelledBySync": "" },
+    }
+  );
+  await syncFromOrder(syncOrder._id); // יישור התעודה למצב ההזמנה לפני המדידה
+
+  const beforeDotted = (await noteNow()).total;
+  const cartNow = (await Order.findById(syncOrder._id).lean()).cart;
+  await Order.updateOne(
+    { _id: syncOrder._id },
+    { $set: { "cart.0.quantity": Number(cartNow[0].quantity) + 3 } }
+  );
+  await settle();
+  check(
+    "$set בנתיב מנוקד מגיע לתעודה",
+    (await noteNow()).total !== beforeDotted,
+    'הבדיקה על "cart" בלבד הייתה מפספסת את "cart.0.quantity"'
+  );
+
+  const beforePull = (await noteNow()).items.length;
+  await Order.updateOne(
+    { _id: syncOrder._id },
+    { $pull: { cart: { _id: cartNow[cartNow.length - 1]._id } } }
+  );
+  await settle();
+  check(
+    "$pull על העגלה מגיע לתעודה",
+    (await noteNow()).items.length < beforePull,
+    "בדיקה על $set/$unset בלבד הייתה מפספסת אופרטורים אחרים"
+  );
+
+  // 8. תעודה שנתפסה לחיוב אינה נדרסת — סגירת חודש עובדת עליה ברגע זה
+  await DeliveryNote.updateOne({ _id: syncNote._id }, { $set: { "billing.status": "billing" } });
+  const claimedTotal = (await noteNow()).total;
+  await Order.updateOne({ _id: syncOrder._id }, { $set: { shippingCost: 99 } });
+  await settle();
+  check("תעודה שנתפסה לחיוב אינה נדרסת", (await noteNow()).total === claimedTotal);
+
+  // 9. ביטול בידי אדם מנקה את דגל הביטול האוטומטי
+  await DeliveryNote.updateOne(
+    { _id: syncNote._id },
+    { $set: { "billing.status": "open", "billing.cancelledBySync": true } }
+  );
+  const { cancel: cancelNote } = require("../lib/billing/deliveryNotes");
+  await cancelNote(syncNote._id, "בדיקה");
+  check(
+    "ביטול בידי אדם מנקה את cancelledBySync",
+    (await noteNow()).billing.cancelledBySync === false,
+    "בלי האיפוס התעודה הייתה קמה לתחייה בעריכת ההזמנה הבאה"
+  );
 
   // ─────────────────────────────────────────────────────────────────
   group("תעודת משלוח ידנית — המשקל שנשקל בפועל");

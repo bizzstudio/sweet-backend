@@ -32,7 +32,7 @@ async function logStatusChange({ from = "", to = "", functionName = "", order })
         }
     }
 
-    // תעודת משלוח אוטומטית כשההזמנה נמסרת.
+    // תעודת משלוח אוטומטית כשההזמנה נכנסת ל"טופלה".
     //
     // ההתלייה כאן ולא בכל controller בנפרד: זו נקודת המעבר היחידה שכל
     // שינויי הסטטוס עוברים דרכה (orderController, customerOrderController,

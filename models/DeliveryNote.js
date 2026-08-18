@@ -14,10 +14,11 @@
 //
 // למה ישות נפרדת ולא שדות על ההזמנה:
 //
-//   1. התעודה היא צילום מצב. ההזמנה ממשיכה להשתנות אחריה (סטטוס, הערות,
-//      ואפילו עריכת פריטים), והמסמך שנמסר ללקוח חייב להישאר מה שנמסר.
-//      החשבונית בסוף החודש נבנית מהתעודות, ולכן היא לא מושפעת משינוי
-//      מאוחר בהזמנה.
+//   1. התעודה היא המסמך שממנו מחייבים, וההזמנה היא מה שהלקוח ביקש.
+//      השניים חופפים ברוב הזמן אבל אינם אותו דבר: התעודה עוקבת אחרי
+//      ההזמנה כל עוד היא `open` (deliveryNotes.syncFromOrder), ומרגע
+//      שחויבה היא קופאת — מולה עומד מסמך מס ב-iCount, ותיקון נעשה בזיכוי.
+//      שדות על ההזמנה לא היו יכולים להחזיק את שני המצבים האלה.
 //   2. מספר רץ עצמאי. מספר ההזמנה שלנו (Order.invoice) הוא מספר פנימי;
 //      תעודת המשלוח היא מסמך שיוצא ללקוח וצריכה סדרה משלה.
 //   3. חיוב. "מה עוד לא חויב" היא שאילתה על התעודות. על ההזמנה זה היה
@@ -66,7 +67,7 @@ const deliveryNoteSchema = new mongoose.Schema(
     // איך הופקה התעודה:
     //
     //   auto   — מההזמנה, על השורות שנמכרות ביחידות. נוצרת אוטומטית במעבר
-    //            ל"נמסר" ומכילה בדיוק את מה שההזמנה אומרת.
+    //            ל"טופלה" ומכילה בדיוק את מה שההזמנה אומרת.
     //   manual — הוקלדה ביד, על סחורה שנשקלת (פירות וירקות). הכמות בה היא
     //            המשקל שנשקל בפועל ולא המשקל שהוזמן, ולכן היא זו שקובעת
     //            את החיוב בסוף החודש.
@@ -166,12 +167,26 @@ const deliveryNoteSchema = new mongoose.Schema(
       // ולחפש לפי מספר. עם הפקה אוטומטית בלילה אף אחד לא רואה את
       // התשובה ההיא בכלל.
       icountDocUrl: { type: String, required: false },
+      // הכתובת שאליה נשלחה החשבונית במייל, או null אם לא נשלחה (אין ללקוח
+      // כתובת תקינה, או שהשליחה כבויה). נשמר ולא רק נרשם בלוג: בסגירה
+      // האוטומטית אף אחד לא רואה את התשובה, ו"האם הלקוח קיבל את החשבונית"
+      // היא שאלה שנשאלת חודשים אחרי.
+      icountDocEmailedTo: { type: String, default: null },
       billedAt: { type: Date, required: false },
       // החודש שאליו שויכה התעודה, בפורמט YYYY-MM. נקבע לפי issuedAt, אבל
       // נשמר בנפרד כדי שאפשר יהיה לשייך ידנית תעודה מאחרת לחודש הקודם.
       billingMonth: { type: String, required: false },
       // הסיבה לביטול, אם בוטלה
       cancelReason: { type: String, required: false },
+
+      // הביטול נעשה על ידי הסנכרון, כי ההזמנה רוקנה מפריטים — ולא על ידי
+      // אדם שהחליט לבטל.
+      //
+      // ההבחנה נחוצה כי ההזמנה יכולה להתמלא שוב: תעודה שבוטלה כך חוזרת
+      // ל-open בסנכרון הבא, ומספר התעודה שכבר יצא ללקוח נשמר. ביטול
+      // אנושי לעולם אינו מבוטל מעצמו — הוא החלטה, ותעודה שתקום לתחייה
+      // בעקבות עריכת הזמנה הייתה מחייבת סחורה שמישהו החליט לא לחייב.
+      cancelledBySync: { type: Boolean, required: false },
 
       // התשלום שסגר את החשבונית של התעודה.
       //
@@ -181,6 +196,8 @@ const deliveryNoteSchema = new mongoose.Schema(
       // שעבר מועד הפירעון שלה הייתה נראית כלא משולמת לנצח.
       receiptDocNum: { type: String, required: false },
       receiptDocUrl: { type: String, required: false },
+      // אותו שיקול כמו ב-icountDocEmailedTo, לקבלה
+      receiptEmailedTo: { type: String, default: null },
       paidAt: { type: Date, required: false },
 
       // היסטוריית הזיכויים של התעודה.
@@ -199,6 +216,49 @@ const deliveryNoteSchema = new mongoose.Schema(
           _id: false,
         },
       ],
+
+      // כיס החיוב של מצב הדמו (ICOUNT_MODE=demo).
+      //
+      // אותם שדות בדיוק, בהיררכיה נפרדת. כל מה שנרשם כאן נוצר מול חשבון
+      // הדמו ב-iCount ואינו קיים בספרים — ולכן הזרימה האמיתית לא קוראת
+      // ולא כותבת לכאן לעולם, ואף שאילתה שלה אינה מזכירה את השדה.
+      //
+      // הבחירה בכיס נפרד על פני בידוד מוחלט: בלי מצב משלו, בדמו אפשר
+      // להפיק חשבונית אבל אי אפשר לראות אותה במסך החשבוניות, לסמן אותה
+      // כשולמה או להוציא עליה קבלה — כי כל המסכים האלה נבנים מהשדות
+      // האלה. ראו lib/billing/ledger.js.
+      //
+      // ניקוי כשחוזרים לחשבון האמיתי: scripts/billing-demo-reset.js
+      demo: {
+        status: {
+          type: String,
+          // cancelled מגיע מזיכוי עם reopenNotes=false, בדיוק כמו בכיס האמיתי
+          enum: ["open", "billing", "billed", "cancelled"],
+          required: false,
+        },
+        cancelReason: { type: String, required: false },
+        claimToken: { type: String, required: false },
+        claimedAt: { type: Date, required: false },
+        icountDocNum: { type: String, required: false },
+        icountDocType: { type: String, required: false },
+        icountDocUrl: { type: String, required: false },
+        icountDocEmailedTo: { type: String, default: null },
+        billedAt: { type: Date, required: false },
+        receiptDocNum: { type: String, required: false },
+        receiptDocUrl: { type: String, required: false },
+        receiptEmailedTo: { type: String, default: null },
+        paidAt: { type: Date, required: false },
+        credits: [
+          {
+            creditDocNum: { type: String, required: false },
+            creditDocUrl: { type: String, required: false },
+            originalDocNum: { type: String, required: false },
+            reason: { type: String, required: false },
+            creditedAt: { type: Date, default: Date.now },
+            _id: false,
+          },
+        ],
+      },
     },
 
     notes: { type: String, required: false },
@@ -208,6 +268,21 @@ const deliveryNoteSchema = new mongoose.Schema(
 
 // השאילתה המרכזית של סגירת החודש: כל התעודות הפתוחות של לקוח בחודש נתון.
 deliveryNoteSchema.index({ customer: 1, "billing.status": 1, "billing.billingMonth": 1 });
+
+// אותה שאלה בלי לקוח: "מי הלקוחות שיש להם תעודות פתוחות עד חודש X".
+// זו השאילתה של בורר הלקוחות במסך סגירת החודש ושל ה-distinct שפותח את
+// הסגירה עצמה. האינדקס שמעל אינו משרת אותה — הוא מתחיל ב-customer,
+// ובלי הערך הזה אין לו קידומת לעבוד לפיה, וכל התעודות נסרקות.
+deliveryNoteSchema.index({ "billing.status": 1, "billing.billingMonth": 1 });
+
+// אין כאן אינדקס נפרד למצב דמו, בכוונה.
+//
+// היה כזה ונמחק: compound sparse מכניס מסמך שיש לו ולו מפתח אחד מהמפתחות,
+// ו-billing.billingMonth קיים כמעט בכל תעודה — כלומר האינדקס היה נבנה על
+// כמעט כל הקולקציה ומתעדכן בכל כתיבה, בשביל מצב הרצה זמני.
+//
+// openQuery בדמו פותח ב-billing.status, ולכן האינדקס הראשון שמעל משרת
+// אותו כרגיל; הסינון על billing.demo.status רץ על התוצאה המצומצמת.
 
 // חיפוש תעודה לפי מספר במסך האדמין
 deliveryNoteSchema.index({ number: -1 });

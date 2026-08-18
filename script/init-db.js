@@ -73,12 +73,16 @@ const languages = [
   { name: "English", iso_code: "en", flag: "US", status: "hide" },
 ];
 
-// הסטטוסים שהקוד מחפש לפי שם (orderController) — בלעדיהם זרימת ההזמנות לא עובדת
+// הסטטוסים שהקוד מחפש לפי שם (orderController) — בלעדיהם זרימת ההזמנות לא עובדת.
+//
+// "Delivered" נזרע מכובה: מאז שתעודת המשלוח נוצרת בקליטת ההזמנה אין יותר
+// מעבר ל"נמסרה", והוא נשאר במסד רק כדי שהדשבורד — שקורא את המזהה שלו
+// ישירות — לא ייפול, ושהזמנות היסטוריות יוצגו נכון. ראה scripts/setup-single-status.js.
 const statuses = [
   { name: "Pending", heName: "ממתין", color: "#f59e0b" },
-  { name: "Processing", heName: "בטיפול", color: "#3b82f6" },
+  { name: "Processing", heName: "טופלה", color: "#3b82f6" },
   { name: "Likut", heName: "ליקוט", color: "#8b5cf6" },
-  { name: "Delivered", heName: "נמסרה", color: "#10b981" },
+  { name: "Delivered", heName: "נמסרה", color: "#10b981", isActive: false },
   { name: "Cancel", heName: "בוטלה", color: "#ef4444" },
 ];
 
@@ -163,7 +167,7 @@ const run = async () => {
   for (const s of statuses) {
     await Status.updateOne(
       { name: s.name },
-      { $setOnInsert: { ...s, phone: "", isActive: true } },
+      { $setOnInsert: { isActive: true, ...s, phone: "" } },
       { upsert: true }
     );
   }

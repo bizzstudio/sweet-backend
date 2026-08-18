@@ -360,6 +360,90 @@ orderSchema.pre("updateOne", async function (next) {
   next();
 });
 
+// 2ב) סנכרון תעודת המשלוח אחרי שההזמנה השתנתה
+//
+// התעודה נוצרת ברגע קליטת ההזמנה (lib/billing/autoDeliveryNote), וההזמנה
+// ממשיכה להשתנות אחריה. החשבונית החודשית נבנית מהתעודות, ולכן שינוי
+// בהזמנה שלא מגיע לתעודה הוא שגיאה בחיוב.
+//
+// למה כאן ולא בכל controller: זו הנקודה היחידה שכל מסלולי הכתיבה עוברים
+// דרכה. חיבור ברמת הסכימה מכסה גם מסלול שייכתב מחר, ואי אפשר לשכוח בו.
+//
+// require מקומי בתוך ה-hook: deliveryNotes דורש את המודל הזה, וייבוא
+// ברמת הקובץ היה תלות מעגלית.
+const BILLING_RELEVANT_FIELDS = ["cart", "discount", "offerDiscount", "shippingCost"];
+
+const syncNote = (orderId, source) => {
+  require("../lib/billing/deliveryNotes")
+    .syncFromOrder(orderId, { changedBy: source })
+    .catch((err) =>
+      console.error(`[delivery-note] סנכרון התעודה להזמנה ${orderId} נכשל: ${err.message}`)
+    );
+};
+
+// isModified מתאפס אחרי השמירה, ולכן הדגל נקבע ב-pre ונקרא ב-post.
+orderSchema.pre("save", function (next) {
+  this.$locals.billingRelevantChange =
+    !this.isNew && BILLING_RELEVANT_FIELDS.some((field) => this.isModified(field));
+  next();
+});
+
+// לא ב-await ולא זורק: סנכרון תעודה לא צריך להאט או להפיל שמירת הזמנה.
+orderSchema.post("save", function (doc) {
+  if (this.$locals?.billingRelevantChange) syncNote(doc._id, "עדכון הזמנה");
+});
+
+// עדכון דרך שאילתה עוקף את מסלול ה-save לגמרי, ולכן הבדיקה כאן היא על
+// גוף העדכון.
+//
+// שלוש מלכודות שהבדיקה חייבת לעבור, וכל אחת מהן היא שינוי בעגלה שלא היה
+// מגיע לתעודה:
+//
+//   { cart: [...] }                    עדכון ישיר, בלי אופרטור
+//   { $set: { "cart.0.quantity": 3 } } נתיב מנוקד — השם המלא אינו "cart"
+//   { $pull: { cart: {...} } }         אופרטור שאינו $set/$unset
+//
+// לכן נאספים כל המפתחות מכל האופרטורים, ומכל מפתח נלקח השורש שלפני
+// הנקודה הראשונה.
+const updateTouchesBilling = function () {
+  const update = this.getUpdate();
+  if (!update || Array.isArray(update)) return false; // pipeline update — לא בשימוש כאן
+
+  const roots = [];
+  for (const [key, value] of Object.entries(update)) {
+    if (key.startsWith("$")) {
+      if (value && typeof value === "object") roots.push(...Object.keys(value));
+    } else {
+      roots.push(key);
+    }
+  }
+
+  return roots.some((path) => BILLING_RELEVANT_FIELDS.includes(path.split(".")[0]));
+};
+
+orderSchema.post("findOneAndUpdate", function (doc) {
+  if (doc && updateTouchesBilling.call(this)) syncNote(doc._id, "עדכון הזמנה");
+});
+
+// updateOne ו-updateMany הם query middleware במונגוס 8, אבל updateOne קיים
+// גם כמתודה על מסמך. הבדיקה על getQuery מוודאת שאנחנו במסלול השאילתה —
+// בלעדיה קריאה מהמסלול השני הייתה זורקת TypeError בתוך post hook, כלומר
+// דחייה שלא נתפסת.
+const syncFromQuery = function () {
+  if (typeof this.getQuery !== "function") return;
+
+  // מזהה ההזמנה נלקח מהשאילתה. עדכון לפי תנאי אחר (בלי _id) אינו מסונכרן:
+  // אין מסלול כזה היום, ושאילתה נוספת בכל עדכון הייתה מחיר על משהו שלא קורה.
+  const id = this.getQuery()?._id;
+  if (id && updateTouchesBilling.call(this)) syncNote(id, "עדכון הזמנה");
+};
+
+orderSchema.post("updateOne", syncFromQuery);
+// updateMany רשום גם הוא. אין לו שימוש על עגלה היום, אבל מסלול שיתווסף
+// מחר ולא יסונכרן הוא בדיוק סוג הכשל שנשאר בשקט עד שמישהו משווה חיוב
+// לסחורה. הבדיקה על _id בשאילתה סוגרת ממילא את המקרה הרחב.
+orderSchema.post("updateMany", syncFromQuery);
+
 // 3) יוצרים את המודל
 const Order = mongoose.model("Order", orderSchema);
 

@@ -15,10 +15,19 @@ const monthlyBilling = require("../lib/billing/monthlyBilling");
 const quotes = require("../lib/billing/quotes");
 const { priceItemsForCustomer, priceQuality } = require("../lib/billing/pricing");
 const { listInvoices } = require("../lib/billing/invoices");
+const { listReceipts, isDayString } = require("../lib/billing/receipts");
 const { calculateVat } = require("../lib/billing/vat");
-const { createReceipt, getDocument, DOC_TYPES } = require("../lib/icount/documents");
+const {
+  createReceipt,
+  getDocument,
+  DOC_TYPES,
+  autoEmailEnabled,
+} = require("../lib/icount/documents");
 const { syncCustomer } = require("../lib/icount/clients");
 const { ping } = require("../lib/icount/client");
+const { isDemoMode, modeLabel } = require("../lib/icount/mode");
+const demo = require("../lib/billing/demo");
+const ledger = require("../lib/billing/ledger");
 
 // תקרות על קלט מהרשת. limit לא חסום מאפשר לבקשה אחת לשלוף את כל
 // הקולקציה, ומערך פריטים לא חסום מאפשר להעמיס את התמחור בשאילתה ענקית.
@@ -28,6 +37,33 @@ const MAX_ITEMS_PER_REQUEST = 500;
 // מזהה שאינו ObjectId תקין מפוצץ את mongoose (new ObjectId זורק), ובלי
 // הבדיקה כתובת שגויה מחזירה 500 עם stack trace במקום 400 ברור.
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(String(id || ""));
+
+// בחירת התעודות להפקה. מזהה לא תקין נדחה מיד ואינו מסונן בשקט: סינון היה
+// מפיק חשבונית על פחות תעודות ממה שסומן במסך, בלי שאיש ידע.
+//
+// מחזיר {error} ולא זורק — כדי שהקורא יחזיר 400 (בקשה שגויה) ולא 500,
+// ששמור לתקלה בשרת.
+const parseNoteIds = (raw) => {
+  if (raw === undefined || raw === null) return {};
+  if (!Array.isArray(raw)) return { error: "רשימת התעודות חייבת להיות מערך" };
+
+  const list = raw.map((v) => String(v).trim()).filter(Boolean);
+
+  // רשימה ריקה שנשלחה במפורש היא "לא נבחרה אף תעודה", ולא "קח הכל".
+  // ההבדל הוא בין בקשה שנדחית לבין חיוב של כל התעודות הפתוחות של הלקוח.
+  if (!list.length) return { error: "לא נבחרה אף תעודה להפקה" };
+
+  if (list.length > MAX_ITEMS_PER_REQUEST) {
+    return { error: `אפשר לבחור עד ${MAX_ITEMS_PER_REQUEST} תעודות בפעולה אחת` };
+  }
+
+  const bad = list.find((id) => !isValidId(id));
+  if (bad) return { error: `מזהה תעודה לא תקין: ${bad}` };
+
+  // כפילות ברשימה אינה מזיקה ($in מתעלם ממנה), אבל היא מעוותת את הספירה
+  // שמוצגת בהודעה למשתמש
+  return { noteIds: [...new Set(list)] };
+};
 
 const safePaging = ({ page, limit }) => {
   const p = Math.max(1, Number(page) || 1);
@@ -91,7 +127,7 @@ const createDeliveryNote = async (req, res) => {
             : `תעודת משלוח ${note.number} נוצרה`) + manualNote,
       created,
       // המסך צריך לרענן את התעודה כדי לראות את מצב החיוב המעודכן
-      note: billed ? await DeliveryNote.findById(note._id).lean() : note,
+      note: billed ? ledger.normalize(await DeliveryNote.findById(note._id).lean()) : note,
       pendingManual: pendingManual || [],
       invoices: billed?.invoices || [],
     });
@@ -151,7 +187,7 @@ const createManualDeliveryNote = async (req, res) => {
           ? `תעודת משלוח ידנית ${note.number} נוצרה וחשבונית ${invoiceNums} הופקה`
           : `תעודת משלוח ידנית ${note.number} נוצרה`,
       created,
-      note: billed ? await DeliveryNote.findById(note._id).lean() : note,
+      note: billed ? ledger.normalize(await DeliveryNote.findById(note._id).lean()) : note,
       quality,
       invoices: billed?.invoices || [],
     });
@@ -183,7 +219,13 @@ const getDeliveryNotes = async (req, res) => {
     const { page, limit, skip } = safePaging(req.query);
 
     const query = {};
-    if (status) query["billing.status"] = status;
+    // "פתוחה" בדמו אינה רק billing.demo.status === "open": תעודה שהדמו
+    // מעולם לא נגע בה אין לה שדה כזה בכלל, והשוואה ישירה הייתה מסתירה
+    // בדיוק את התעודות שממתינות לחיוב. "בוטלה" נשאר על הרישום האמיתי,
+    // כי ביטול תעודה אינו פעולת חיוב.
+    if (status === "open") Object.assign(query, ledger.openQuery());
+    else if (status === "cancelled") query["billing.status"] = "cancelled";
+    else if (status) query[ledger.f("status")] = status;
     if (month) query["billing.billingMonth"] = month;
     if (customer) query.customer = customer;
     // תעודות ישנות נוצרו לפני שהשדה קיים והן כולן אוטומטיות. סינון על
@@ -196,7 +238,8 @@ const getDeliveryNotes = async (req, res) => {
       DeliveryNote.countDocuments(query),
     ]);
 
-    res.send({ notes, total, page, limit });
+    // המסך מקבל את מצב הכיס הפעיל תחת billing, ולכן אינו יודע דבר על דמו
+    res.send({ notes: ledger.normalizeAll(notes), total, page, limit });
   } catch (err) {
     res.status(500).send({ message: err.message });
   }
@@ -204,7 +247,7 @@ const getDeliveryNotes = async (req, res) => {
 
 const getDeliveryNote = async (req, res) => {
   try {
-    const note = await DeliveryNote.findById(req.params.id).lean();
+    const note = ledger.normalize(await DeliveryNote.findById(req.params.id).lean());
     if (!note) return res.status(404).send({ message: "תעודה לא נמצאה" });
     // totals מחושב בשרת ולא בדפדפן, כדי שלא יהיו שני חישובי מע"מ שיכולים
     // להיפרד. המסמך המודפס רק מציג את מה שמגיע מכאן.
@@ -232,9 +275,9 @@ const getDeliveryNoteByOrder = async (req, res) => {
       return res.status(400).send({ message: "מזהה הזמנה לא תקין" });
     }
 
-    const notes = await DeliveryNote.find({ order: req.params.orderId })
-      .sort({ number: 1 })
-      .lean();
+    const notes = ledger.normalizeAll(
+      await DeliveryNote.find({ order: req.params.orderId }).sort({ number: 1 }).lean()
+    );
 
     // 200 עם null ולא 404: "אין תעודה" הוא מצב תקין ולא שגיאה, והמסך
     // צריך להבדיל בינו לבין כשלון בקריאה
@@ -285,6 +328,12 @@ const cancelDeliveryNote = async (req, res) => {
  */
 const previewMonth = async (req, res) => {
   try {
+    // מזהה שאינו ObjectId מגיע ל-mongoose וזורק CastError — 500 עם stack
+    // trace במקום הסבר. הבדיקה כאן הופכת אותו ל-400 מובן.
+    if (req.query.customer && !isValidId(req.query.customer)) {
+      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
+    }
+
     const result = await monthlyBilling.closeMonth({
       month: req.query.month,
       customerId: req.query.customer,
@@ -294,6 +343,46 @@ const previewMonth = async (req, res) => {
   } catch (err) {
     res.status(500).send({ message: err.message });
   }
+};
+
+/**
+ * הלקוחות שיש להם תעודות פתוחות בחודש — למילוי בורר הלקוח במסך.
+ */
+const openCustomers = async (req, res) => {
+  try {
+    res.send(await monthlyBilling.openCustomers({ month: req.query.month }));
+  } catch (err) {
+    // חודש בפורמט שגוי הוא בקשה פסולה, לא תקלת שרת
+    res.status(/חודש לא תקין/.test(err.message) ? 400 : 500).send({ message: err.message });
+  }
+};
+
+/**
+ * ההודעה שמוצגת אחרי ההפקה.
+ *
+ * שלושה מצבים שונים, ואסור שיישמעו אותו דבר:
+ *   - לא הופק כלום. קורה כשמישהו אחר חייב את אותן תעודות בין התצוגה
+ *     המקדימה ללחיצה, או כשאין תעודות פתוחות. "0 חשבוניות הופקו" בנוסח
+ *     של הצלחה נקרא כמו תקלה.
+ *   - הפקה על תעודות שנבחרו. "חודש 2026-08 נסגר" על שתי תעודות באמצע
+ *     החודש הוא פשוט לא נכון, ומי שקורא יחשוב שהחודש טופל.
+ *   - סגירת חודש מלאה.
+ */
+const closeMessage = (result, noteIds) => {
+  if (!result.invoicesCreated) {
+    return noteIds
+      ? "לא הופקה אף חשבונית — התעודות שנבחרו כבר חויבו או שאינן פתוחות"
+      : `אין תעודות פתוחות לחיוב בחודש ${result.month}`;
+  }
+
+  if (result.selectionUsed) {
+    const rest = result.remainingOpen
+      ? `. ${result.remainingOpen} תעודות נשארו פתוחות ויחויבו בסגירת החודש`
+      : "";
+    return `הופקו ${result.invoicesCreated} חשבוניות על ${noteIds.length} תעודות שנבחרו${rest}`;
+  }
+
+  return `חודש ${result.month} נסגר — ${result.invoicesCreated} חשבוניות ל-${result.customersProcessed} לקוחות`;
 };
 
 /**
@@ -311,6 +400,19 @@ const closeMonth = async (req, res) => {
       });
     }
 
+    if (req.body.customer && !isValidId(req.body.customer)) {
+      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
+    }
+
+    // כל הולידציות לפני releaseStuckClaims: בקשה פסולה לא צריכה לגעת במסד.
+    const { noteIds, error } = parseNoteIds(req.body.notes);
+    if (error) return res.status(400).send({ message: error });
+    if (noteIds && !req.body.customer) {
+      return res
+        .status(400)
+        .send({ message: "בחירת תעודות ספציפיות אפשרית רק כשנבחר לקוח בודד" });
+    }
+
     // תעודות שנתקעו מריצה קודמת שקרסה — משחררים לפני שמתחילים, אחרת הן
     // לא ייכללו בחיוב וייפלו בין הכסאות.
     await monthlyBilling.releaseStuckClaims();
@@ -318,13 +420,15 @@ const closeMonth = async (req, res) => {
     const result = await monthlyBilling.closeMonth({
       month: req.body.month,
       customerId: req.body.customer,
-      emailDocument: req.body.emailDocument === true,
+      noteIds,
+      // רק בוליאני מפורש מהבקשה גובר על המדיניות. body בלי השדה חייב
+      // להישאר undefined ולא false — אחרת כל לחיצה במסך הייתה מבטלת בשקט
+      // את השליחה האוטומטית ללקוח.
+      emailDocument:
+        typeof req.body.emailDocument === "boolean" ? req.body.emailDocument : undefined,
     });
 
-    res.send({
-      message: `חודש ${result.month} נסגר — ${result.invoicesCreated} חשבוניות ל-${result.customersProcessed} לקוחות`,
-      ...result,
-    });
+    res.send({ message: closeMessage(result, noteIds), ...result });
   } catch (err) {
     res.status(500).send({ message: err.message });
   }
@@ -372,18 +476,19 @@ const createReceiptForPayment = async (req, res) => {
     if (invoices.length) {
       const alreadyPaid = await DeliveryNote.findOne({
         customer,
-        "billing.icountDocNum": { $in: invoices },
-        "billing.paidAt": { $ne: null },
+        [ledger.f("icountDocNum")]: { $in: invoices },
+        [ledger.f("paidAt")]: { $ne: null },
       })
-        .select("billing.icountDocNum billing.receiptDocNum")
+        .select("billing")
         .lean();
 
       if (alreadyPaid) {
+        const paid = ledger.of(alreadyPaid);
         return res.status(409).send({
           message:
-            `כבר נרשם תשלום לחשבונית ${alreadyPaid.billing.icountDocNum}` +
-            (alreadyPaid.billing.receiptDocNum
-              ? ` (קבלה ${alreadyPaid.billing.receiptDocNum})`
+            `כבר נרשם תשלום לחשבונית ${paid.icountDocNum}` +
+            (paid.receiptDocNum
+              ? ` (קבלה ${paid.receiptDocNum})`
               : "") +
             ". לתשלום נוסף יש להפיק קבלה ידנית ב-iCount.",
         });
@@ -396,7 +501,7 @@ const createReceiptForPayment = async (req, res) => {
       method,
       forInvoices: invoices,
       details: details || {},
-      emailDocument: emailDocument === true,
+      emailDocument: typeof emailDocument === "boolean" ? emailDocument : undefined,
     });
 
     // סימון התעודות של אותן חשבוניות כמשולמות. בלי זה החשבונית הייתה
@@ -409,12 +514,17 @@ const createReceiptForPayment = async (req, res) => {
     if (invoices.length) {
       try {
         const upd = await DeliveryNote.updateMany(
-          { customer, "billing.icountDocNum": { $in: invoices }, "billing.status": "billed" },
+          {
+            customer,
+            [ledger.f("icountDocNum")]: { $in: invoices },
+            [ledger.f("status")]: "billed",
+          },
           {
             $set: {
-              "billing.receiptDocNum": doc.docNum,
-              "billing.receiptDocUrl": doc.url || null,
-              "billing.paidAt": new Date(),
+              [ledger.f("receiptDocNum")]: doc.docNum,
+              [ledger.f("receiptDocUrl")]: doc.url || null,
+              [ledger.f("receiptEmailedTo")]: doc.emailedTo || null,
+              [ledger.f("paidAt")]: new Date(),
             },
           }
         );
@@ -434,6 +544,40 @@ const createReceiptForPayment = async (req, res) => {
     });
   } catch (err) {
     res.status(400).send({ message: err.message });
+  }
+};
+
+/**
+ * כל הקבלות שהופקו דרך המערכת, לפי טווח תאריכי תשלום ולקוח.
+ *
+ * הרשימה נבנית מהתעודות שסומנו כמשולמות (lib/billing/receipts), ולכן
+ * הסכום שבה הוא אומדן וקבלה שהופקה ידנית ב-iCount לא תופיע. המסך אומר
+ * את זה במפורש כדי שלא ישמש להתאמת בנק.
+ */
+const getReceipts = async (req, res) => {
+  try {
+    const { customer, from, to } = req.query;
+
+    // מזהה פסול היה מפוצץ את השאילתה ב-CastError ומחזיר 500 סתמי
+    if (customer && !isValidId(customer)) {
+      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
+    }
+    // תאריך פסול לא נבלע בשקט: סינון שלא סונן מציג רשימה מלאה שנראית
+    // כמו התוצאה של הטווח שנבחר
+    for (const [label, value] of [["ההתחלה", from], ["הסיום", to]]) {
+      if (value && !isDayString(value)) {
+        return res
+          .status(400)
+          .send({ message: `תאריך ${label} אינו תקין (נדרש YYYY-MM-DD)` });
+      }
+    }
+    if (isDayString(from) && isDayString(to) && from > to) {
+      return res.status(400).send({ message: "תאריך הסיום מוקדם מתאריך ההתחלה" });
+    }
+
+    res.send({ receipts: await listReceipts({ customerId: customer, from, to }) });
+  } catch (err) {
+    res.status(500).send({ message: err.message });
   }
 };
 
@@ -571,8 +715,11 @@ const getCustomerDocuments = async (req, res) => {
       return res.status(400).send({ message: "מזהה לקוח לא תקין" });
     }
 
-    const [notes, openNotes, quoteList, invoices, customer] = await Promise.all([
+    const [notes, openNotes, quoteList, invoices, receiptList, customer] = await Promise.all([
       DeliveryNote.aggregate([
+        // ההמרה לכיס הפעיל נעשית אחרי השליפה (ledger.normalizeAll למטה) —
+        // בלעדיה כרטיס הלקוח היה המסך היחיד שמציג את הרישום האמיתי בזמן
+        // שכל השאר מציגים דמו
         { $match: { customer: new mongoose.Types.ObjectId(String(customerId)) } },
         { $sort: { number: -1 } },
         {
@@ -589,7 +736,7 @@ const getCustomerDocuments = async (req, res) => {
           },
         },
       ]),
-      DeliveryNote.countDocuments({ customer: customerId, "billing.status": "open" }),
+      DeliveryNote.countDocuments({ customer: customerId, ...ledger.openQuery() }),
       Quote.aggregate([
         { $match: { customer: new mongoose.Types.ObjectId(String(customerId)) } },
         { $sort: { number: -1 } },
@@ -605,6 +752,9 @@ const getCustomerDocuments = async (req, res) => {
         },
       ]),
       listInvoices({ customerId }),
+      // הקבלות של הלקוח. אותה פונקציה שמזינה את מסך הקבלות — כדי שכרטיס
+      // הלקוח לא יחשב "מה שולם" בדרך משלו ויסתור את המסך המלא
+      listReceipts({ customerId }),
       // רק השם, לכותרת מסך "מסמכי לקוח". נשלף כאן ולא בקריאה נפרדת
       // לכרטיס הלקוח: זו שאילתה אחת על המפתח הראשי, בתוך אותו Promise.all,
       // והיא חוסכת מהדפדפן למשוך את מסמך הלקוח המלא (שכולל גם את הסיסמה)
@@ -619,7 +769,7 @@ const getCustomerDocuments = async (req, res) => {
         ? { _id: customer._id, name: customer.name, lastName: customer.lastName }
         : null,
       deliveryNotes: {
-        items: notes,
+        items: ledger.normalizeAll(notes),
         total: notes.length,
         open: openNotes,
       },
@@ -630,6 +780,15 @@ const getCustomerDocuments = async (req, res) => {
         overdue: invoices.filter((i) => i.isOverdue).length,
         owed: Number(
           invoices.filter((i) => !i.isPaid).reduce((s, i) => s + i.grossEstimate, 0).toFixed(2)
+        ),
+      },
+      receipts: {
+        items: receiptList,
+        total: receiptList.length,
+        // אומדן ולא סכום מחייב, כמו בכל מקום שבו הסכום מחושב מהתעודות
+        // ולא נקרא מהמסמך עצמו
+        paidEstimate: Number(
+          receiptList.reduce((s, r) => s + r.grossEstimate, 0).toFixed(2)
         ),
       },
       quotes: {
@@ -700,12 +859,133 @@ const syncCustomerToIcount = async (req, res) => {
   }
 };
 
+/**
+ * המצב הפעיל בלבד — בלי לגעת ב-iCount.
+ *
+ * icountStatus מתחבר מחדש בכל קריאה (ping מאפס את ה-session בכוונה, כדי
+ * שהתשובה תהיה בדיקה אמיתית). הבאנר "מצב דמו" יושב על ארבעה מסכים, ואם
+ * הוא היה קורא לשם — כל טעינת מסך חיוב הייתה התחברות נוספת ל-iCount,
+ * ותקלת רשת אצלם הייתה תולה את המסך עד 30 שניות על שורת אזהרה.
+ *
+ * ה-cid מגיע מהסביבה ולא מ-iCount, ולכן אין כאן שום קריאה יוצאת.
+ */
+const icountMode = async (req, res) => {
+  try {
+    const demo = isDemoMode();
+    res.send({
+      mode: modeLabel(),
+      demo,
+      cid: (demo ? process.env.ICOUNT_DEMO_CID : process.env.ICOUNT_CID) || null,
+      // מסך סגירת החודש מאתחל ממנו את תיבת "לשלוח במייל", ולכן הוא חייב
+      // להופיע כאן בדיוק כמו ב-icountStatus. בדמו התשובה היא תמיד false —
+      // baseDoc לא ישלח בשום מקרה, ותיבה מסומנת הייתה משקרת.
+      emailDocuments: demo ? false : autoEmailEnabled(),
+    });
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
 /** בדיקת חיבור ל-iCount — למסך ההגדרות באדמין. */
 const icountStatus = async (req, res) => {
+  // מדיניות השליחה במייל (BILLING_EMAIL_DOCUMENTS) חוזרת בשני המסלולים:
+  // המסכים מציגים לפיה את מצב ההתחלה של תיבת "שלח ללקוח", ותיבה שמנחשת
+  // "כן" בזמן שהמדיניות כבויה הייתה מדליקה שליחה שמישהו כיבה בכוונה.
+  // בדמו baseDoc חוסם שליחה בכל מקרה, ולכן "המדיניות פעילה" הוא דיווח
+  // שקרי — המסך היה מסמן תיבת שליחה על מסמכים שלא יישלחו
+  const emailDocuments = isDemoMode() ? false : autoEmailEnabled();
+
   try {
-    res.send({ connected: true, ...(await ping()) });
+    res.send({ connected: true, emailDocuments, ...(await ping()) });
   } catch (err) {
-    res.status(503).send({ connected: false, message: err.message });
+    // גם כשהחיבור נכשל הממשק חייב לדעת באיזה מצב הוא. אחרת מסך שלא הצליח
+    // להתחבר ייראה זהה בדמו ובאמת, וזו הטעות היקרה מכולן.
+    res.status(503).send({
+      connected: false,
+      emailDocuments,
+      mode: modeLabel(),
+      demo: isDemoMode(),
+      message: err.message,
+    });
+  }
+};
+
+// --- מסך הדמו ---
+//
+// כל המסלולים כאן נופלים ב-409 כשהמערכת מחוברת לחשבון האמיתי (assertDemo
+// בתוך lib/billing/demo). 409 ולא 400: הבקשה תקינה, המצב הוא שאינו מתאים.
+
+const demoError = (res, err) =>
+  res.status(/רק כש-ICOUNT_MODE=demo/.test(err.message) ? 409 : 400).send({
+    message: err.message,
+    demo: isDemoMode(),
+  });
+
+/** רשימות למילוי הטפסים במסך הדמו. */
+const demoOptions = async (req, res) => {
+  try {
+    const [{ customers, total }, notes] = await Promise.all([
+      demo.listDemoCustomers(),
+      demo.listDemoSources(),
+    ]);
+    res.send({
+      demo: isDemoMode(),
+      customers,
+      deliveryNotes: notes,
+      sampleItems: demo.SAMPLE_ITEMS,
+      // כמה לקוחות באמת קיימים. כשהמספר גדול מאורך הרשימה המסך מציין
+      // זאת, במקום להציג רשימה חלקית כאילו היא מלאה
+      customersTotal: total,
+    });
+  } catch (err) {
+    demoError(res, err);
+  }
+};
+
+/** הפקת חשבונית הדגמה. */
+const createDemoInvoice = async (req, res) => {
+  try {
+    const { deliveryNoteId, customerId } = req.body || {};
+    if (deliveryNoteId && !isValidId(deliveryNoteId)) {
+      return res.status(400).send({ message: "מזהה תעודת משלוח אינו תקין" });
+    }
+    if (customerId && !isValidId(customerId)) {
+      return res.status(400).send({ message: "מזהה לקוח אינו תקין" });
+    }
+    res.send(await demo.issueDemoInvoice({ deliveryNoteId, customerId }));
+  } catch (err) {
+    demoError(res, err);
+  }
+};
+
+/** הסכומים כפי ש-iCount מחזיר אותם, לצד האומדן שלנו. */
+const getDemoTotal = async (req, res) => {
+  try {
+    res.send(await demo.fetchDemoTotal(req.params.docnum));
+  } catch (err) {
+    demoError(res, err);
+  }
+};
+
+/** זיכוי חשבונית הדגמה. */
+const createDemoCredit = async (req, res) => {
+  try {
+    const { docNum, reason } = req.body || {};
+    if (!docNum) return res.status(400).send({ message: "חסר מספר חשבונית לזיכוי" });
+    res.send(await demo.issueDemoCredit({ docNum, reason }));
+  } catch (err) {
+    demoError(res, err);
+  }
+};
+
+/** קבלה על חשבונית הדגמה. */
+const createDemoReceipt = async (req, res) => {
+  try {
+    const { docNum, method, amount } = req.body || {};
+    if (!docNum) return res.status(400).send({ message: "חסר מספר חשבונית לקבלה" });
+    res.send(await demo.issueDemoReceipt({ docNum, method, amount }));
+  } catch (err) {
+    demoError(res, err);
   }
 };
 
@@ -720,9 +1000,11 @@ module.exports = {
   getInvoiceTotal,
   cancelDeliveryNote,
   previewMonth,
+  openCustomers,
   closeMonth,
   creditInvoice,
   createReceiptForPayment,
+  getReceipts,
   priceItems,
   createQuote,
   getQuotes,
@@ -731,6 +1013,12 @@ module.exports = {
   rejectQuote,
   getCustomerOpenInvoices,
   getCustomerDocuments,
+  icountMode,
+  demoOptions,
+  createDemoInvoice,
+  createDemoCredit,
+  createDemoReceipt,
+  getDemoTotal,
   getIcountDocument,
   syncCustomerToIcount,
   icountStatus,

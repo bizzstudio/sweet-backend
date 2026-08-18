@@ -11,8 +11,19 @@ const billingController = require("../controller/billingController");
 
 // --- iCount ---
 router.get("/icount/status", isAdmin, billingController.icountStatus);
+// המצב בלבד, בלי קריאה ל-iCount — זה מה שהבאנר במסכי החיוב קורא
+router.get("/icount/mode", isAdmin, billingController.icountMode);
 router.post("/icount/sync-customer/:customerId", isAdmin, billingController.syncCustomerToIcount);
 router.get("/icount/document/:doctype/:docnum", isAdmin, billingController.getIcountDocument);
+
+// --- מסך דמו ---
+// זמין רק כש-ICOUNT_MODE=demo; אחרת כל אחד מהם מחזיר 409 (הבדיקה בשכבת
+// lib/billing/demo, כדי שגם קריאה מסקריפט תיחסם ולא רק מהמסלול)
+router.get("/demo/options", isAdmin, billingController.demoOptions);
+router.post("/demo/invoice", isAdmin, billingController.createDemoInvoice);
+router.get("/demo/invoice/:docnum/total", isAdmin, billingController.getDemoTotal);
+router.post("/demo/credit", isAdmin, billingController.createDemoCredit);
+router.post("/demo/receipt", isAdmin, billingController.createDemoReceipt);
 
 // --- תעודות משלוח ---
 // סטטיים לפני /:id, אחרת "month" ייחשב ל-ObjectId
@@ -28,11 +39,15 @@ router.patch("/delivery-notes/:id/cancel", isAdmin, billingController.cancelDeli
 // --- סגירת חודש ---
 // preview הוא GET ולא משנה כלום; close הוא POST ודורש confirm:true
 router.get("/month/preview", isAdmin, billingController.previewMonth);
+// הלקוחות שיש להם תעודות פתוחות — הבורר במסך סגירת החודש. ?month=YYYY-MM
+router.get("/month/open-customers", isAdmin, billingController.openCustomers);
 router.post("/month/close", isAdmin, billingController.closeMonth);
 
 // --- זיכוי וקבלה ---
 router.post("/credit", isAdmin, billingController.creditInvoice);
 router.post("/receipt", isAdmin, billingController.createReceiptForPayment);
+// רשימת הקבלות שהופקו. ?customer=<id>&from=YYYY-MM-DD&to=YYYY-MM-DD
+router.get("/receipts", isAdmin, billingController.getReceipts);
 
 // --- הצעות מחיר ---
 // price-items הוא POST למרות שהוא לא משנה כלום — רשימת הפריטים ארוכה מדי

@@ -26,6 +26,9 @@ const {
 } = require("../lib/email-sender/templates/forget-password");
 const { newApplicationBody } = require("../lib/email-sender/templates/new-application");
 const { assignWelcomeGiftToCustomer } = require("../utils/welcomeGift");
+// אותה בדיקה בדיוק שמחליטה בזמן ההפקה אם אפשר לשלוח את החשבונית. שתי
+// גרסאות היו מאפשרות לשמור כתובת שהמסך מאשר וההפקה פוסלת בשקט.
+const { isDeliverableEmail } = require("../lib/icount/clients");
 
 const PHONE_TAKEN_MESSAGE =
   "מספר הטלפון הזה כבר רשום במערכת. ניתן להתחבר באמצעות המספר וקוד ב-SMS.";
@@ -1403,6 +1406,27 @@ const updateCustomer = async (req, res) => {
             });
           }
           customer.set("billing.mode", mode);
+        }
+
+        // כתובת המייל לחשבוניות. שדה חופשי ולא ייחודי — הנהלת חשבונות אחת
+        // יכולה לשרת כמה לקוחות. כתובת פגומה נדחית ולא נשמרת: היא תתגלה רק
+        // בסוף החודש, כשהחשבונית תופק ולא תישלח לאיש.
+        if (req.body.billing?.invoiceEmail !== undefined) {
+          const raw = req.body.billing.invoiceEmail;
+          if (raw !== null && typeof raw !== "string") {
+            return res.status(400).send({ message: "כתובת מייל לחשבוניות אינה תקינה." });
+          }
+
+          const invoiceEmail = String(raw || "").trim().toLowerCase();
+
+          // ריק = ניקוי מכוון, וחזרה לכתובת הרגילה של הלקוח
+          if (invoiceEmail && !isDeliverableEmail(invoiceEmail)) {
+            return res.status(400).send({
+              message: `"${invoiceEmail}" אינה כתובת מייל שאפשר לשלוח אליה חשבונית.`,
+            });
+          }
+
+          customer.set("billing.invoiceEmail", invoiceEmail || undefined);
         }
       }
 

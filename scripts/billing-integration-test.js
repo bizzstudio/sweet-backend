@@ -9,6 +9,12 @@
 //
 //   node scripts/billing-integration-test.js
 
+// ICOUNT_MODE נקבע כאן ולא נלקח מ-.env: הבדיקות האלה מאמתות את הזרימה
+// האמיתית, ולכן חייבות לרוץ ב-live גם כשהשרת מחובר כרגע לחשבון דמו.
+// dotenv אינו דורס ערך קיים, ולכן ההשמה הזאת מנצחת. את מצב הדמו בודק
+// scripts/billing-demo-test.js.
+process.env.ICOUNT_MODE = "live";
+
 require("dotenv").config();
 const mongoose = require("mongoose");
 
@@ -38,6 +44,7 @@ const { createFromOrder } = require("../lib/billing/deliveryNotes");
 const { splitByNoteKind } = require("../lib/billing/manualItems");
 const { billNoteImmediately, closeMonth, previousMonth } = require("../lib/billing/monthlyBilling");
 const { onOrderStatusChange } = require("../lib/billing/autoDeliveryNote");
+const { listInvoices } = require("../lib/billing/invoices");
 
 let pass = 0;
 let fail = 0;
@@ -131,6 +138,53 @@ const cleanup = async () => {
   check("תעודה שחויבה מיידית לא נכללת בסגירה", !stillOpen);
 
   // ─────────────────────────────────────────────────────────────────
+  // התכונה שכל מצב הדמו עומד עליה, נבדקת מהצד של live: תעודה שחויבה
+  // בחשבון הדמו חייבת להיראות לחיוב האמיתי כאילו לא קרה לה דבר. אם
+  // openQuery או billedQuery יזלגו יום אחד לכיס הדמו, הבדיקה הזאת תיפול
+  // לפני שלקוח יקבל חשבונית חסרה.
+  group("שרידי מצב דמו אינם משפיעים על החיוב האמיתי");
+
+  issued = [];
+  const { note: demoMarked } = await createFromOrder(orders[2]._id, { issuedBy: TAG });
+  await DeliveryNote.updateOne(
+    { _id: demoMarked._id },
+    { $set: {
+        "billing.billingMonth": previousMonth(),
+        "billing.demo": {
+          status: "billed",
+          icountDocNum: "DEMO-9999",
+          billedAt: new Date(),
+          paidAt: new Date(),
+          receiptDocNum: "DEMO-RCPT",
+        },
+    } }
+  );
+
+  await Customer.updateOne({ _id: customer._id }, { $set: { "billing.mode": "monthly" } });
+  const realClose = await closeMonth({ month: previousMonth(), customerId: customer._id });
+  const realInvoice = realClose.results.flatMap((r) => r.invoices)[0];
+  check("תעודה עם שרידי דמו נאספה לחיוב האמיתי", !!realInvoice, JSON.stringify(realClose.failures || []));
+
+  const afterReal = await DeliveryNote.findById(demoMarked._id).lean();
+  check("היא סומנה בכיס האמיתי", afterReal.billing.status === "billed", afterReal.billing.status);
+  check(
+    "והחשבונית שנרשמה עליה אינה של הדמו",
+    afterReal.billing.icountDocNum && afterReal.billing.icountDocNum !== "DEMO-9999",
+    afterReal.billing.icountDocNum
+  );
+  check("כיס הדמו לא השתנה", afterReal.billing.demo?.icountDocNum === "DEMO-9999");
+  check(
+    "רשימת החשבוניות האמיתית אינה מציגה את מסמך הדמו",
+    !(await listInvoices({ customerId: customer._id })).some((i) => i.docNum === "DEMO-9999")
+  );
+
+  // החזרת המסלול כפי שהיה. הקבוצה הזאת נזקקה ל-monthly כדי שסגירת החודש
+  // תאסוף את התעודה, אבל הקבוצות שאחריה בודקות את החיוב המיידי — ולקוח
+  // שנשאר monthly גורם ל-billNoteImmediately לחזור מוקדם, בלי לגעת
+  // ב-iCount המדומה, וכך failNext של הבדיקה הבאה דולף לזו שאחריה.
+  await Customer.updateOne({ _id: customer._id }, { $set: { "billing.mode": "perDelivery" } });
+
+  // ─────────────────────────────────────────────────────────────────
   group("רשת ביטחון — כשלון בחיוב מיידי");
 
   issued = [];
@@ -162,7 +216,7 @@ const cleanup = async () => {
 
     await onOrderStatusChange({
       orderId: orders[2]._id,
-      toStatusName: "Delivered",
+      toStatusName: "Processing",
       changedBy: TAG,
     });
     // ההפעלה מהזרימה האוטומטית אינה ב-await
