@@ -151,6 +151,14 @@ const rankProductsByRelevance = (products, originalQuery, queryWords, variations
     }
 
     // 6. בונוס קל לשמות קצרים יותר (רק אם יש התאמה טובה)
+    //
+    // ⚠ נוסה כאן קנס לפי **מילים** בכותרת שהלקוח לא כתב, במקום לפי מספר תווים.
+    // הרעיון נכון בתיאוריה — "בייגלה שטוחים לפסח" מוסיף מזהה שלא נתבקש — אבל
+    // המדידה על 146 שמות פריטים אמיתיים הפריכה אותו: 34 מהם שינו מוצר,
+    // "נייר אפייה 50 יחידות" צנח מ-0.97 ל-0.53 ועבר לגרסת ה-(ח'),
+    // "צלחות חד פעמיות שטוחות קטנות" עבר מ-"קטן" ל-"גדול", ו-"סויה ללא סוכר"
+    // קיבל "סוכריות ללא סוכר" בביטחון 0.85. הכיוון הזה מגדיל ביטחון בתשובות
+    // שגויות, ולכן נזנח. הכרעה בין מועמדים שקולים נעשית ב-ProductAlias.
     if (foundWholeWords > 0) {
       const titleLength = heTitle.length || enTitle.length;
       if (titleLength > 0) {
@@ -412,6 +420,7 @@ const matchProductByName = async (rawName, options = {}) => {
     );
   const exactTitleMatch =
     isExactTitle(best.product) && !(runnerUp && isExactTitle(runnerUp.product));
+
 
   return {
     product: best.product,
