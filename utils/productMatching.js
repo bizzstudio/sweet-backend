@@ -16,6 +16,10 @@ const {
   createApostropheIgnoringRegex,
 } = require("./voiceParser");
 
+// אורך מרבי של שם שנשלח לחיפוש. ראה הנימוק המלא ב-matchProductByName —
+// בקצרה: בלי חסם, שורת פריט ארוכה במייל של לקוח מפילה את השרת ב-OOM.
+const MAX_SEARCH_NAME_LENGTH = 200;
+
 // נרמול כותרת/שאילתה להשוואה מילולית. זהה בכוונה ל-normalizeForComparison
 // שבתוך rankProductsByRelevance, כדי ששתי ההשוואות יראו את אותו טקסט.
 const normalizeTitleForMatch = (text) =>
@@ -277,8 +281,25 @@ const matchProductByName = async (rawName, options = {}) => {
 
   if (!rawName || typeof rawName !== "string" || !rawName.trim()) return null;
 
+  // ── חסימת אורך הקלט ──
+  //
+  // כל מה שמתחת בונה רגקסים מהטקסט הזה: `createApostropheIgnoringRegex` מוסיפה
+  // קבוצה **לכל תו**, וכל ווריאציה צליליות הופכת ל-5 תנאי חיפוש. העלות גדלה
+  // מהר יותר מלינארית באורך, ובלי חסם היא מגיעה עד קריסת התהליך: נמדד ש-5,000
+  // תווים מפילים את השרת ב-OOM, ו-1,000 תווים זורקים שגיאת Buffer מתוך הדרייבר.
+  //
+  // הנתיב פתוח לקלט לא מהימן: שורת פריט במייל של לקוח מגיעה לכאן כמו שהיא.
+  // כלומר מייל אחד יכול להפיל את **כל השרת**, לא רק את קליטת ההזמנה.
+  //
+  // התקרה נמדדה: השם הארוך ביותר בקטלוג הוא 59 תווים, וכל שם פריט אמיתי
+  // שנצפה בהזמנות קצר מ-200. מה שארוך מזה אינו שם מוצר אלא שורת נתונים
+  // שנקראה בטעות, והחיתוך רק מגדיל את הסיכוי שהחלק המשמעותי שלה יימצא.
+  const boundedName = rawName.length > MAX_SEARCH_NAME_LENGTH
+    ? rawName.slice(0, MAX_SEARCH_NAME_LENGTH)
+    : rawName;
+
   // parseText מוציא גם את הכמות מתוך הטקסט ("שתי שקיות תמרים" → quantity 2)
-  const { query, quantity, variations } = parseText(rawName);
+  const { query, quantity, variations } = parseText(boundedName);
   if (!query) return null;
 
   const searchConditions = buildProductSearchConditions(query, variations);
@@ -289,7 +310,10 @@ const matchProductByName = async (rawName, options = {}) => {
   // הספרה היא לרוב המזהה: "קפה עלית 100 גרם" מול "200 גרם", "50 יחידות" מול
   // "100 יחידות". בלי התנאי הזה השאילתה מאבדת בדיוק את מה שמבדיל ביניהם,
   // ומוצר שכתוב בשמו במדויק לא נמצא בכלל.
-  const originalTrimmed = String(rawName).trim();
+  // ‏boundedName ולא rawName: גם כאן נבנים רגקסים מהטקסט, ולכן הוא חייב להיות
+  // חסום מאותה סיבה בדיוק. הניסוח הראשון של החסימה פספס את השורה הזו, כך
+  // שהחסם הוחל על parseText בלבד והנתיב הזה נשאר פתוח לרוחב.
+  const originalTrimmed = boundedName.trim();
   if (/\d/.test(originalTrimmed)) {
     searchConditions.push(
       { "title.he": createApostropheIgnoringRegex(originalTrimmed) },
@@ -405,6 +429,9 @@ const matchProductByName = async (rawName, options = {}) => {
 };
 
 module.exports = {
+  // מיוצא כדי ש-utils/productAliases ינרמל בדיוק כמו מנוע ההתאמה. שני נרמולים
+  // שונים היו גורמים לאליאס שנשמר לא להימצא לעולם — ראה שם.
+  normalizeTitleForMatch,
   rankProductsByRelevance,
   buildProductSearchConditions,
   scoreToConfidence,

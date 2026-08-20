@@ -35,6 +35,9 @@ router.post("/delivery-notes/manual", isAdmin, billingController.createManualDel
 router.get("/delivery-notes/pending-manual/:orderId", isAdmin, billingController.getPendingManualItems);
 router.get("/delivery-notes/:id", isAdmin, billingController.getDeliveryNote);
 router.patch("/delivery-notes/:id/cancel", isAdmin, billingController.cancelDeliveryNote);
+// הדפסה. הדפסה חוזרת היא POST כי היא מוציאה נייר; מצב ההדפסה הוא GET.
+router.post("/delivery-notes/:id/reprint", isAdmin, billingController.reprintDeliveryNote);
+router.get("/delivery-notes/:id/print-status", isAdmin, billingController.getDeliveryNotePrintStatus);
 
 // --- סגירת חודש ---
 // preview הוא GET ולא משנה כלום; close הוא POST ודורש confirm:true

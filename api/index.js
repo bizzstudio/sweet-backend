@@ -31,6 +31,7 @@ const incomingOrderRoutes = require("../routes/incomingOrderRoutes");
 const blogRoutes = require("../routes/blogRoutes");
 const lotteryRoutes = require("../routes/lotteryRoutes");
 const billingRoutes = require("../routes/billingRoutes");
+const printJobRoutes = require("../routes/printJobRoutes");
 const monthEndCron = require("../lib/billing/monthEndCron");
 const { getActiveLottery } = require("../controller/lotteryController");
 
@@ -120,6 +121,10 @@ app.use("/api/blog/", blogRoutes);
 // חיוב: תעודות משלוח, סגירת חודש והפקת מסמכים ב-iCount. ההגנה היא isAdmin
 // בתוך הראוטר עצמו ולא כאן, כדי שכל מסלול יהיה מסומן במפורש.
 app.use("/api/billing/", billingRoutes);
+// תור ההדפסה. הלקוח היחיד שלו הוא print-agent שרץ על המחשב שליד המדפסת,
+// והאימות הוא PRINT_AGENT_TOKEN בתוך הראוטר — לא isAdmin, כי לסוכן אין
+// משתמש ואין התחברות.
+app.use("/api/print-jobs/", printJobRoutes);
 // סגירת חודש אוטומטית: ביום האחרון של החודש ב-23:00 (שעון ישראל) מופקות
 // חשבוניות מס ב-iCount ונשלח מייל סיכום. כיבוי: BILLING_AUTO_CLOSE=false.
 monthEndCron.register();

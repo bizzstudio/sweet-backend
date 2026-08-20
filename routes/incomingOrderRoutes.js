@@ -13,6 +13,8 @@ const {
   approveErrorOrder,
   retryFromOrder,
   approveSenderAndReprocess,
+  getItemCandidates,
+  resolveItemAlias,
   getWhitelistStats,
   refreshWhitelist,
   scanEmailNow,
@@ -85,6 +87,17 @@ router.post("/order/:orderId/approve", isAdmin, approveErrorOrder);
 
 // הרצה חוזרת של ההודעה שממנה נוצרה ההזמנה (מוחק את הזמנת השגיאה)
 router.post("/order/:orderId/retry", isAdmin, retryFromOrder);
+
+// ── לימוד: "כשהלקוח כותב X הוא מתכוון למוצר Y" ──
+//
+// שני הנתיבים משרתים שורה שלא זוהתה: הראשון מציג למי אפשר להתכוון, השני
+// שומר במה בחרו. השמירה אינה מריצה את ההזמנה מחדש — ראה resolveItemAlias.
+
+// המועמדים לשורה, כפי שמנוע ההתאמה רואה אותם עכשיו
+router.get("/order/:orderId/item-candidates", isAdmin, getItemCandidates);
+
+// "זה המוצר" — שומר את ההכרעה לפעם הבאה
+router.post("/order/:orderId/resolve-item", isAdmin, resolveItemAlias);
 
 // רשימת ההודעות שנקלטו
 router.get("/", isAdmin, getAllIncomingOrders);

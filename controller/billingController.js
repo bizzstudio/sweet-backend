@@ -28,6 +28,8 @@ const { ping } = require("../lib/icount/client");
 const { isDemoMode, modeLabel } = require("../lib/icount/mode");
 const demo = require("../lib/billing/demo");
 const ledger = require("../lib/billing/ledger");
+const PrintJob = require("../models/PrintJob");
+const { queueDeliveryNote, isEnabled: printingEnabled } = require("../lib/printing/printJobs");
 
 // תקרות על קלט מהרשת. limit לא חסום מאפשר לבקשה אחת לשלוף את כל
 // הקולקציה, ומערך פריטים לא חסום מאפשר להעמיס את התמחור בשאילתה ענקית.
@@ -317,6 +319,85 @@ const cancelDeliveryNote = async (req, res) => {
     res.send({ message: `תעודה ${note.number} בוטלה`, note });
   } catch (err) {
     res.status(400).send({ message: err.message });
+  }
+};
+
+/**
+ * הדפסה חוזרת של תעודה.
+ *
+ * קיים כי ההדפסה האוטומטית יכולה להיכשל מסיבות שאין להן שום קשר למערכת —
+ * המדפסת כבויה, נגמר הנייר, המחשב שבמשרד לא דלוק. בלי המסלול הזה התעודה
+ * היחידה שאפשר להוציא היא זו שמדפיסים ביד מהמסך, ואת מצב התור אי אפשר
+ * לאפס בכלל.
+ *
+ * מאפס משימה קיימת במקום להוסיף שנייה, כדי שלחיצה כפולה לא תוציא שני ניירות.
+ */
+const reprintDeliveryNote = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה תעודה לא תקין" });
+    }
+
+    const note = await DeliveryNote.findById(req.params.id)
+      .select("_id number billing.status")
+      .lean();
+    if (!note) return res.status(404).send({ message: "תעודה לא נמצאה" });
+
+    // תעודה מבוטלת אינה מסמך. הדפסה שלה הייתה שולחת ללקוח נייר שאין
+    // מאחוריו כלום, ובדיוק בשביל זה בוטלה משימת ההדפסה שלה מלכתחילה.
+    if (note.billing?.status === "cancelled") {
+      return res.status(400).send({ message: `תעודה ${note.number} בוטלה — אין מה להדפיס` });
+    }
+
+    const { queued, reason } = await queueDeliveryNote(note, {
+      requestedBy: req.user?.email || "הדפסה חוזרת",
+      reprint: true,
+    });
+
+    // ההדפסה כבויה בשרת, או שהכתיבה לתור נכשלה. אישור "נשלח להדפסה" על
+    // פעולה שלא קרתה גרוע מהודעת שגיאה — המשתמש הולך לחפש נייר שלא יגיע.
+    if (!queued) {
+      const message =
+        reason === "disabled"
+          ? "ההדפסה האוטומטית כבויה בשרת (PRINTING_ENABLED=false)"
+          : "שליחת התעודה למדפסת נכשלה — ראו את לוג השרת";
+      return res.status(reason === "disabled" ? 409 : 500).send({ message });
+    }
+
+    res.send({ message: `תעודה ${note.number} נשלחה להדפסה` });
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/**
+ * מצב ההדפסה של תעודה — בשביל האדמין, כדי שיהיה אפשר לענות על
+ * "האם זה יצא מהמדפסת" בלי לגשת ללוגים של השרת.
+ */
+const getDeliveryNotePrintStatus = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה תעודה לא תקין" });
+    }
+
+    const job = await PrintJob.findOne({ docType: "deliveryNote", docId: req.params.id }).lean();
+
+    // אין משימה = מעולם לא נשלחה להדפסה. שני מצבים תקינים לגמרי, ולכן
+    // לא 404 — תעודה שנוצרה לפני שהתכונה קיימת, או הדפסה שכבויה בשרת.
+    // ההבחנה ביניהם חשובה: "כבויה" היא הסבר, ו"none" הוא חוסר מידע.
+    if (!job) {
+      return res.send({ status: printingEnabled() ? "none" : "disabled" });
+    }
+
+    res.send({
+      status: job.status,
+      attempts: job.attempts,
+      printedAt: job.printedAt,
+      lastError: job.lastError,
+      requestedBy: job.requestedBy,
+    });
+  } catch (err) {
+    res.status(500).send({ message: err.message });
   }
 };
 
@@ -999,6 +1080,8 @@ module.exports = {
   getInvoices,
   getInvoiceTotal,
   cancelDeliveryNote,
+  reprintDeliveryNote,
+  getDeliveryNotePrintStatus,
   previewMonth,
   openCustomers,
   closeMonth,

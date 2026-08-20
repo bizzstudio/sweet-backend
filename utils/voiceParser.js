@@ -235,6 +235,15 @@ function createApostropheIgnoringRegex(word) {
     return new RegExp(regexPattern, 'i');
 };
 
+// אורך מרבי של טקסט שנכנס לניתוח. ראה הנימוק בתוך parseText — בקצרה: הנתיב
+// הציבורי /api/products/voice-search מזרים לכאן פרמטר GET כמו שהוא, ובלי
+// חסם בקשה אחת מפילה את השרת ב-OOM.
+const MAX_TRANSCRIPT_LENGTH = 200;
+
+// תקרת ווריאציות למילה בודדת. ראה הנימוק המלא בתוך הלולאה למטה — בקצרה:
+// בלעדיה מילה ארוכה מפילה את התהליך כולו ב-OOM.
+const MAX_WORD_VARIATIONS = 64;
+
 // פונקציה ליצירת ווריאציות לאותיות עבריות שנשמעות דומה
 function generateSimilarSoundingVariations(text) {
     if (!text || typeof text !== 'string') return [text];
@@ -257,11 +266,11 @@ function generateSimilarSoundingVariations(text) {
 
     // פיצול הטקסט למילים
     const words = text.trim().split(/\s+/).filter(Boolean);
-    
+
     // יצירת ווריאציות לכל מילה
     const wordVariations = words.map(word => {
         const variations = new Set([word]);
-        
+
         // עבור כל אות במילה, אם יש לה אותיות דומות - יצור ווריאציות
         for (let i = 0; i < word.length; i++) {
             const currentLetter = word[i];
@@ -270,14 +279,31 @@ function generateSimilarSoundingVariations(text) {
                 currentVariations.forEach(variation => {
                     similarLetters[currentLetter].forEach(similarLetter => {
                         if (similarLetter !== currentLetter) {
-                            const newVariation = variation.substring(0, i) + 
-                                                similarLetter + 
+                            const newVariation = variation.substring(0, i) +
+                                                similarLetter +
                                                 variation.substring(i + 1);
                             variations.add(newVariation);
                         }
                     });
                 });
             }
+
+            // ── עצירה בתקרה: הלולאה הזו גדלה מעריכית ──
+            //
+            // כל אות עם צליל דומה מכפילה או משלשת את הקבוצה, ולכן מילה בת N
+            // אותיות כאלה מייצרת עד 3^N ווריאציות — ואין כאן שום גבול.
+            //
+            // זה אינו תרחיש תיאורטי: בקטלוג הקיים "קקיס/שיש/שוקוציפס/אנגליש/
+            // שוקולד" (31 תווים, מילה אחת כי אין רווחים סביב הלוכסנים) מייצרת
+            // 98,304 ווריאציות, וכל אחת מהן הופכת ל-5 תנאי חיפוש מול מונגו.
+            // מילה ארוכה במעט יותר מפילה את התהליך כולו ב-OOM — כלומר **כל
+            // השרת** נופל, לא רק הבקשה. הנתיב פתוח משורת פריט במייל של לקוח,
+            // מהחיפוש הקולי בקופה, וממסך בחירת המוצר בדשבורד.
+            //
+            // התקרה נמדדה מול נתוני אמת: על 130 שמות הפריטים שנצפו בהזמנות, תוצאת
+            // ההתאמה **זהה לחלוטין** עם התקרה ובלעדיה (נבדק גם ב-24 וגם ב-64).
+            // הקומבינציות בין מילים כבר חסומות ל-10 למטה — כאן היה החור.
+            if (variations.size >= MAX_WORD_VARIATIONS) break;
         }
 
         return Array.from(variations);
@@ -311,8 +337,26 @@ function parseText(transcript = '') {
             return { query: '', quantity: 1 };
         }
 
+        /* ─── 0. חסימת אורך ─── */
+        //
+        // החסימה יושבת כאן ולא רק אצל הקוראים, כי `parseText` הוא הצוואר
+        // המשותף שלהם ואי אפשר לעקוף אותו. הקורא שמחייב את זה הוא
+        // ‏GET /api/products/voice-search: המידלוור שלו (extractUserDetails)
+        // **אינו חוסם** — הוא מגדיר req.user={} וממשיך — כלומר הנתיב פתוח
+        // לכל אחד ברשת, והוא מעביר לכאן את הפרמטר transcript כמו שהוא.
+        //
+        // מה שקורה בלי החסימה: כל תו הופך לקבוצה ברגקס
+        // (‏createApostropheIgnoringRegex), וכל ווריאציה צליליות ל-5 תנאי
+        // חיפוש. נמדד ש-5,000 תווים מפילים את התהליך ב-OOM. כלומר בקשת GET
+        // אחת מפילה את כל השרת.
+        //
+        // התקרה נדיבה פי כמה מכל תמלול או שם מוצר אמיתי (הארוך בקטלוג: 59).
+        const bounded = transcript.length > MAX_TRANSCRIPT_LENGTH
+            ? transcript.slice(0, MAX_TRANSCRIPT_LENGTH)
+            : transcript;
+
         /* ─── 1. Normalize ─── */
-        const clean = transcript
+        const clean = bounded
             .trim()
             .toLowerCase()
             .replace(/[^\u0590-\u05ffa-z0-9\s'\'`ʼʻ]/g, ' ')   // שמירה על גרשים בשלב זה

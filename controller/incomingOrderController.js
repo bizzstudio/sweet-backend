@@ -8,6 +8,7 @@
 
 require("dotenv").config();
 const cron = require("node-cron");
+const mongoose = require("mongoose");
 
 const IncomingOrder = require("../models/IncomingOrder");
 const Order = require("../models/Order");
@@ -32,6 +33,10 @@ const {
 } = require("../lib/order-ingestion/senderWhitelist");
 const { readAttachment, MAX_ATTACHMENT_BYTES } = require("../lib/attachment-reader");
 const Customer = require("../models/Customer");
+const Product = require("../models/Product");
+const { matchProductByName } = require("../utils/productMatching");
+const { findAliasMatch, saveAlias } = require("../utils/productAliases");
+const { extractQualifiers } = require("../lib/order-ingestion/qualifiers");
 const { canonicalPhone } = require("../utils/phone");
 
 /**
@@ -659,6 +664,173 @@ const retryFromOrder = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────
+//  לימוד: "כשהלקוח הזה כותב X, הוא מתכוון למוצר Y"
+// ─────────────────────────────────────────────────────────────
+//
+// שני הנתיבים כאן הם כל מה שצריך כדי שהכרעה אנושית לא תלך לאיבוד: אחד מציג
+// למי אפשר להתכוון, והשני שומר במה בחרו. הרקע המלא ב-models/ProductAlias.
+
+/**
+ * GET /api/incoming-orders/order/:orderId/item-candidates?name=...
+ *
+ * המועמדים לשורה שלא זוהתה, כפי שמנוע ההתאמה רואה אותם עכשיו.
+ *
+ * המועמדים אינם נשמרים על ההזמנה בכוונה — הם נגזרת של הקטלוג, והקטלוג משתנה.
+ * שורה שנכשלה לפני שבוע יכולה להיפתר היום כי המוצר נוסף, ורשימה שהוקפאה
+ * בזמן הכשל הייתה מסתירה בדיוק את המוצר החדש.
+ */
+// ── מזהה הזמנה שאינו ObjectId ──
+//
+// ‏findById על מחרוזת שאינה מזהה זורק CastError, ובלי הבדיקה הזו ההודעה
+// הגולמית של mongoose ("Cast to ObjectId failed for value ... at path _id for
+// model Order") הייתה מגיעה כמות שהיא למסך. היא גם אינה אומרת דבר למי שקורא
+// אותה, וגם חושפת את שמות המודלים והשדות הפנימיים.
+const asOrderId = (value, res) => {
+  if (mongoose.Types.ObjectId.isValid(String(value || ""))) return true;
+  res.status(400).send({ message: "מזהה הזמנה לא תקין" });
+  return false;
+};
+
+const getItemCandidates = async (req, res) => {
+  try {
+    if (!asOrderId(req.params.orderId, res)) return;
+
+    const rawName = String(req.query.name || "").trim();
+    if (!rawName) return res.status(400).send({ message: "חסר שם הפריט" });
+
+    const order = await Order.findById(req.params.orderId).select("user").lean();
+    if (!order) return res.status(404).send({ message: "ההזמנה לא נמצאה" });
+
+    // אותו ניקוי מזהים שהצינור עושה לפני החיפוש, אחרת המסך היה מציג מועמדים
+    // אחרים מאלה שהקליטה שקלה — ומי שבוחר היה בוחר מרשימה שאינה הרשימה.
+    const { cleanName } = extractQualifiers(rawName);
+    const searchName = cleanName || rawName;
+
+    const [match, existing] = await Promise.all([
+      matchProductByName(searchName, {
+        requireShown: false,
+        requireStock: false,
+        alternativesCount: 9,
+      }),
+      findAliasMatch(searchName, order.user),
+    ]);
+
+    // סינכרוני: כל מה שצריך כבר נשלף ב-hydrated למטה. הניסוח הראשון כאן היה
+    // async ושלף בתוך ה-map — כלומר N+1 על כל פתיחת שורה.
+    const toCandidate = (p) => {
+      // החלופות מגיעות רזות (_id/title/sku בלבד), והמסך צריך גם מלאי ומחיר
+      const full = p?.prices !== undefined ? p : hydrated.get(String(p?._id));
+      if (!full) return null;
+      return {
+        _id: full._id,
+        title: full.title?.he || full.title?.en || "",
+        sku: full.sku || null,
+        price: full.prices?.price ?? null,
+        stock: full.stock ?? null,
+        hidden: full.status === "hide",
+      };
+    };
+
+    const pool = match ? [match.product, ...(match.alternatives || [])] : [];
+
+    // ── שליפה אחת לכל החלופות, לא אחת לכל חלופה ──
+    //
+    // ‏matchProductByName מחזיר את המוביל כמסמך מלא ואת החלופות רזות
+    // (‏_id/title/sku), והמסך צריך גם מלאי, מחיר ומצב פרסום. שליפה בתוך ה-map
+    // הייתה תשע שאילתות רצופות על כל פתיחת שורה.
+    const thinIds = pool.filter((p) => p && p.prices === undefined).map((p) => p._id);
+    const hydrated = new Map(
+      thinIds.length
+        ? (await Product.find({ _id: { $in: thinIds } }).lean()).map((p) => [String(p._id), p])
+        : []
+    );
+
+    const candidates = pool.map(toCandidate).filter(Boolean);
+
+    res.send({
+      searchName,
+      candidates,
+      // מה שכבר הוכרע לשם הזה, אם הוכרע — כדי שהמסך יסמן אותו ולא יבקש
+      // מהעובד להחליט מחדש על משהו שכבר הוחלט
+      currentAlias: existing
+        ? {
+            productId: existing.product._id,
+            title: existing.product.title?.he,
+            scope: existing.scope,
+          }
+        : null,
+    });
+  } catch (err) {
+    console.log("getItemCandidates error: ", err);
+    res.status(400).send({ message: err.message });
+  }
+};
+
+/**
+ * POST /api/incoming-orders/order/:orderId/resolve-item
+ * body: { rawName, productId, scope: "customer" | "global" }
+ *
+ * "זה המוצר שהתכוונו אליו" — שומר את ההכרעה ומחזיר אותה.
+ *
+ * הנתיב **אינו** מריץ את ההזמנה מחדש. בהזמנה עם כמה שורות פתוחות, הרצה אחרי
+ * כל בחירה הייתה מוחקת את הזמנת השגיאה ויוצרת אחת חדשה באמצע העבודה עליה —
+ * כלומר העובד היה מאבד את המסך שהוא עומד בו. ההרצה החוזרת נשארת פעולה נפרדת
+ * ומפורשת, אחרי שכל השורות הוכרעו.
+ */
+const resolveItemAlias = async (req, res) => {
+  try {
+    if (!asOrderId(req.params.orderId, res)) return;
+
+    const { rawName, productId, scope = "customer" } = req.body || {};
+    if (!rawName) return res.status(400).send({ message: "חסר שם הפריט" });
+    if (!productId) return res.status(400).send({ message: "לא נבחר מוצר" });
+
+    // ── ההיקף נבדק במפורש ולא נגזר מ"כל מה שאינו global" ──
+    //
+    // ההפרש בין שני ההיקפים הוא הפרש בין הכרעה שחלה על לקוח אחד לבין הכרעה
+    // שחלה על כולם. ערך שאינו מוכר ("Global" ברי"ש גדולה, שדה שנשלח בטעות)
+    // היה נופל בשקט לצד אחד — כלומר כתיבה שקטה של היקף שאיש לא ביקש.
+    if (scope !== "customer" && scope !== "global") {
+      return res.status(400).send({ message: `היקף לא מוכר: "${scope}"` });
+    }
+
+    const order = await Order.findById(req.params.orderId).select("user").lean();
+    if (!order) return res.status(404).send({ message: "ההזמנה לא נמצאה" });
+
+    if (scope === "customer" && !order.user) {
+      return res
+        .status(400)
+        .send({ message: "להזמנה אין לקוח משויך — אפשר לשמור רק הכרעה כלל-מערכתית" });
+    }
+
+    const { cleanName } = extractQualifiers(String(rawName));
+    const searchName = cleanName || String(rawName);
+
+    const alias = await saveAlias({
+      rawName: searchName,
+      productId,
+      customerId: scope === "global" ? null : order.user,
+      // ‏adminDisplayName ולא req.user.name: השם בסכמה הוא אובייקט ({he,en}),
+      // ושמירתו הישירה בשדה String מפילה את הפעולה בשגיאת ולידציה. ראה שם.
+      createdBy: adminDisplayName(req.user),
+    });
+
+    const product = await Product.findById(productId).select("title sku").lean();
+
+    res.send({
+      message:
+        scope === "global"
+          ? `מעכשיו "${searchName}" ייקרא כ-"${product?.title?.he}" אצל כל הלקוחות`
+          : `מעכשיו "${searchName}" ייקרא כ-"${product?.title?.he}" אצל הלקוח הזה`,
+      alias,
+    });
+  } catch (err) {
+    console.log("resolveItemAlias error: ", err);
+    res.status(400).send({ message: err.message });
+  }
+};
+
 /**
  * POST /api/incoming-orders/:id/approve-sender
  *
@@ -963,6 +1135,8 @@ module.exports = {
   approveErrorOrder,
   retryFromOrder,
   approveSenderAndReprocess,
+  getItemCandidates,
+  resolveItemAlias,
   getWhitelistStats,
   refreshWhitelist,
   scanEmailNow,
