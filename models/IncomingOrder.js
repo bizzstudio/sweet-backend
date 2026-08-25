@@ -20,6 +20,10 @@ const INCOMING_ORDER_ERROR_CODES = [
   "below_minimum",        // מתחת למינימום ההזמנה ליעד
   "out_of_stock",         // אין מלאי מספיק
   "order_create_failed",  // כשל טכני ביצירת ההזמנה (וגם ברירת המחדל לכל קוד לא מוכר)
+  // ── הזמנה שיושבת מעבר לקישור (פלטפורמות כמו Zestt) ──
+  "platform_login_required",     // הקישור נפתח אבל הדף דרש התחברות לפלטפורמה
+  "link_unreadable",             // הקישור לא נפתח, נחסם, או שלא היה בו טקסט
+  "platform_customer_unmapped",  // ההזמנה נקראה, אבל לא ידוע איזה לקוח שלנו זה
 ];
 
 // פריט שזוהה בהודעה + מה הוא הותאם אליו בקטלוג
@@ -109,6 +113,61 @@ const incomingOrderSchema = new mongoose.Schema(
     processAfter: { type: Date, required: false },
     lastMessageAt: { type: Date, required: false },
 
+    // ── הזמנה שיושבת מעבר לקישור ──
+    //
+    // פלטפורמת הזמנות שולחת מייל בלי שורות הזמנה: כותרת, פרטי לקוח, וכפתור
+    // "לצפייה בהזמנה". השורות נמצאות רק מעבר לכפתור, ולכן הצינור פותח את
+    // הקישור בדפדפן שרץ בשרת ומוסיף את הטקסט שמצא ל-rawText.
+    //
+    // ‏links נשמר גם כשלא נפתח דבר — הוא מה שמאפשר למסך להציע "פתח בפלטפורמה"
+    // ולמי שמאשר פלטפורמה לראות לאן הקישור מוביל לפני שהוא מאשר.
+    links: {
+      type: [
+        {
+          url: { type: String },
+          host: { type: String },
+          anchor: { type: String },   // טקסט הכפתור — "לצפייה בהזמנה"
+          score: { type: Number },    // ניקוד הזיהוי, ראה lib/link-follower/extractLinks
+          reason: { type: String },   // למה נבחר — לתחקור זיהוי שגוי
+          _id: false,
+        },
+      ],
+      required: false,
+      default: undefined,
+    },
+
+    // תוצאת הפתיחה בפועל. נשמרת גם בכשל — היא ההסבר שהמסך מציג.
+    linkFollow: {
+      attempted: { type: Boolean, required: false },
+      url: { type: String, required: false },
+      host: { type: String, required: false },
+      finalUrl: { type: String, required: false },  // אחרי הפניות
+      title: { type: String, required: false },
+      chars: { type: Number, required: false },     // כמה טקסט נקרא מהדף
+      ok: { type: Boolean, required: false },
+      code: { type: String, required: false },
+      error: { type: String, required: false },
+      loginRequired: { type: Boolean, required: false },
+      blocked: { type: Boolean, required: false },
+      followedAt: { type: Date, required: false },
+      // צילום מסך מכווץ (data URI). לעיני אדם בלבד — הפרסר קורא טקסט.
+      // **מוחרג במפורש משליפת הרשימה** בקונטרולר: 20 רשומות עם צילום כל אחת
+      // הן תשובה של מגה-בייטים למסך שמציג שורות.
+      screenshot: { type: String, required: false },
+    },
+
+    // הפלטפורמה שההודעה הגיעה ממנה, אם זוהתה
+    platform: {
+      ref: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "OrderPlatform",
+        required: false,
+      },
+      key: { type: String, required: false },   // zestt.io
+      name: { type: String, required: false },  // "Zestt"
+      status: { type: String, required: false },
+    },
+
     // ── תוצאת העיבוד ──
     status: {
       type: String,
@@ -129,6 +188,14 @@ const incomingOrderSchema = new mongoose.Schema(
         // סטטוס נפרד ולא "ignored" בכוונה: ייתכן שזו הזמנה אמיתית מלקוח חדש,
         // ואסור שהיא תיבלע יחד עם מה שסומן ידנית כלא רלוונטי.
         "unknown_sender",
+        // ── פלטפורמת הזמנות שטרם אושרה ──
+        //
+        // מייל שהגיע מ-no-reply@ של פלטפורמה, עם קישור להזמנה בגוף. זה אינו
+        // "שולח לא מוכר": שם הפעולה הנכונה היא "צור לקוח מהשולח הזה", וכאן
+        // היא הייתה יוצרת כרטיס לקוח בשם הפלטפורמה ומצמידה אליו את ההזמנות
+        // של כל המסעדות. הפעולה הנכונה כאן היא "אשר את הפלטפורמה" — פעם אחת
+        // לפלטפורמה, ולא פעם אחת לכל לקוח.
+        "platform_pending",
       ],
       default: "received",
     },
@@ -200,6 +267,17 @@ incomingOrderSchema.index({ "sender.phone": 1 });
 incomingOrderSchema.index({ status: 1, processAfter: 1 });
 // מניעת צירוף כפול של אותה הודעה לרשומה פתוחה
 incomingOrderSchema.index({ "messages.externalId": 1 });
+
+// ── מניעת הזמנה כפולה מאותו קישור ──
+//
+// ‏externalId מגן מפני עיבוד כפול של אותה **הודעה**, אבל פלטפורמה שולחת
+// לפעמים שתי הודעות על אותה הזמנה (התראה + תזכורת), וכל אחת היא הודעה
+// אחרת עם אותו קישור בדיוק. בלי הבדיקה הזו התוצאה היא שתי הזמנות זהות
+// במערכת — כלומר סחורה שנשלחת פעמיים. חלקי: רק לרשומות שבהן נפתח קישור.
+incomingOrderSchema.index(
+  { "linkFollow.url": 1, status: 1 },
+  { partialFilterExpression: { "linkFollow.url": { $exists: true } } }
+);
 
 // ── רשומת צבירה אחת בלבד לכל מספר ──
 //

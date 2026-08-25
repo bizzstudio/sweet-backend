@@ -10,6 +10,7 @@ const productRoutes = require("../routes/productRoutes");
 const offerRoutes = require("../routes/offerRoutes");
 const customerRoutes = require("../routes/customerRoutes");
 const customerPriceListRoutes = require("../routes/customerPriceListRoutes");
+const customerHistoryRoutes = require("../routes/customerHistoryRoutes");
 const adminRoutes = require("../routes/adminRoutes");
 const orderRoutes = require("../routes/orderRoutes");
 const appOrderRoutes = require("../routes/appOrderRoutes");
@@ -28,6 +29,7 @@ const popupRoutes = require('../routes/popupRoutes');
 const messageRoutes = require('../routes/messageRoutes');
 const cashierOrderRoutes = require("../routes/cashierOrderRoutes");
 const incomingOrderRoutes = require("../routes/incomingOrderRoutes");
+const orderPlatformRoutes = require("../routes/orderPlatformRoutes");
 const blogRoutes = require("../routes/blogRoutes");
 const lotteryRoutes = require("../routes/lotteryRoutes");
 const billingRoutes = require("../routes/billingRoutes");
@@ -106,6 +108,7 @@ app.use("/api/customer/", customerRoutes);
 // מחירונים פרטיים ללקוחות. נתיב נפרד ולא תת-נתיב של /api/customer כדי שלא
 // ייבלע ע"י "/:id" שרשום שם
 app.use("/api/customer-price-list/", customerPriceListRoutes);
+app.use("/api/customer-history/", customerHistoryRoutes);
 app.use("/api/order/", customerOrderRoutes);
 app.use("/api/cashier-orders/", cashierOrderRoutes);
 app.use("/api/attributes/", attributeRoutes);
@@ -150,6 +153,8 @@ app.use("/api/orders/", orderRoutes);
 // קליטת הזמנות מהמייל ומווצאפ. האימות מוגדר per-route (webhook מול אדמין),
 // ולכן אין כאן מידלוור גלובלי.
 app.use("/api/incoming-orders/", incomingOrderRoutes);
+// מרשם הפלטפורמות ששולחות הזמנה בקישור (Zestt ודומותיה) — ראה lib/link-follower
+app.use("/api/order-platforms/", orderPlatformRoutes);
 app.use("/api/status/", isAdmin, statusRoutes);
 
 // Sync the app with the orders

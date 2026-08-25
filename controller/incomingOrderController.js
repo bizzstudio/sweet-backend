@@ -352,6 +352,11 @@ const getAllIncomingOrders = async (req, res) => {
 
     const [docs, totalDoc, counts, stuckCount] = await Promise.all([
       IncomingOrder.find(query)
+        // צילום המסך של הדף שנפתח הוא data URI של עשרות קילובייטים. הרשימה
+        // מחזירה 20 רשומות, כלומר בלי ההחרגה הזו תשובת המסך תופחת למגה-בייטים
+        // על תמונות שאף אחד לא מסתכל בהן בתצוגת שורות. ראה נתיב screenshot
+        // ב-orderPlatformRoutes לצפייה בבודדת.
+        .select("-linkFollow.screenshot")
         .populate({ path: "resolved.customer", select: "name lastName email phone" })
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -848,6 +853,22 @@ const approveSenderAndReprocess = async (req, res) => {
     if (doc.status !== "unknown_sender") {
       return res.status(400).send({
         message: `ההודעה אינה בסטטוס "שולח לא מוכר" (סטטוס נוכחי: ${doc.status})`,
+      });
+    }
+
+    // ── הודעת פלטפורמה אינה שולח שאפשר לפתוח ממנו כרטיס לקוח ──
+    //
+    // השולח הוא no-reply@ של הפלטפורמה, ואותה כתובת בדיוק שולחת את ההזמנות
+    // של **כל** המסעדות. הפעולה הזו הייתה יוצרת כרטיס לקוח בשם הפלטפורמה
+    // ומצמידה אליו את כולן — כולל מחירון והיסטוריית הזמנות מעורבבת. הפעולה
+    // הנכונה היא אישור הפלטפורמה במסך הפלטפורמות.
+    if (doc.platform?.ref || doc.links?.length) {
+      return res.status(400).send({
+        message:
+          "זו הודעה מפלטפורמת הזמנות ולא מלקוח. יצירת לקוח מכתובת השולח " +
+          "הייתה מאחדת את כל הלקוחות של הפלטפורמה לכרטיס אחד. " +
+          "יש לאשר את הפלטפורמה במסך הפלטפורמות, ואז למפות את הלקוח.",
+        platform: doc.platform || null,
       });
     }
 

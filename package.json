@@ -20,6 +20,8 @@
     "ingest:test": "node script/test-ingestion.js",
     "ingest:reclassify": "node script/reclassify-conversations.js",
     "ingest:filter-test": "node script/test-conversation-filter.js",
+    "ingest:guard-test": "node script/test-order-table-guard.js",
+    "order:delete-error": "node script/delete-ingestion-error-order.js",
     "import:preflight": "node script/import-preflight.js",
     "stock:set": "node script/set-stock.js",
     "prices:set": "node script/set-prices.js",
@@ -28,7 +30,11 @@
     "pdf:check": "node script/check-pdfs.js",
     "notes:clean": "node script/clean-ingestion-notes.js",
     "notes:split": "node script/split-system-notes.js",
-    "alias:test": "node script/test-aliases.js"
+    "alias:test": "node script/test-aliases.js",
+    "history:test": "node script/test-purchase-history.js",
+    "history:pipeline-test": "node script/test-history-pipeline.js",
+    "history:aggregate-test": "node script/test-history-aggregate.js",
+    "link:test": "node script/test-link-follow.js"
   },
   "author": "המתוקים של בני",
   "license": "ISC",
