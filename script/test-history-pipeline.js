@@ -216,16 +216,28 @@ const findStuckLine = async () => {
       false
     );
 
-    section("שורה בלי כמות אינה נכנסת דרך ההיסטוריה");
-    // ההיסטוריה עונה על "לאיזה מוצר", לא על "האם זו שורת מוצר בכלל". שורת
-    // כתובת ששמה במקרה מתאים למוצר שהלקוח קונה הייתה נכנסת למשלוח בשקט.
-    const assumed = await resolveItems(
-      [{ rawName, quantity: 1, quantityAssumed: true }],
-      { customerId: CUSTOMER, historyProfile: profileOf([{ product: first }]) }
-    );
+    section("שורה בלי כמות: נדרשת לתאר את המוצר");
+    // ‏"קפה טורקי" בלי כמות היא הצורה הנפוצה להזמין בווצאפ וחייבת לעבוד.
+    // שורת כתובת שנקראה בטעות כפריט — לא.
+    const assumedRun = (text) =>
+      resolveItems([{ rawName: text, quantity: 1, quantityAssumed: true }], {
+        customerId: CUSTOMER,
+        historyProfile: profileOf([{ product: first }]),
+      });
+
+    const entered = (result) =>
+      String(result.items[0]?.product?._id || "") === String(first._id);
+
+    // הטקסט שמתאר את המוצר במדויק — כל מילה בו נמצאת בשם המוצר
+    check("שורה שמתארת את המוצר נכנסת", entered(await assumedRun(first.title?.he)), true);
+
+    // ── שורת כתובת ──
+    //
+    // הטקסט אינו מתאר את המוצר, ולכן גם אם ההתאמה מצאה אותו והלקוח קונה אותו
+    // בקביעות — הוא לא ייכנס. זה מה שמונע מכתובת לצאת במשלוח כפריט.
     check(
-      "המוצר אינו נכנס לעגלה",
-      String(assumed.items[0]?.product?._id || "") === String(first._id),
+      "שורת כתובת אינה נכנסת גם כשהמוצר בהיסטוריה",
+      entered(await assumedRun("קומה 3 דירה 12 הרצל בני ברק")),
       false
     );
 

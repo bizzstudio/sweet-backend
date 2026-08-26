@@ -26,6 +26,9 @@
 // מדרגת את מי ששרד, ואינה מחזירה לחיים מועמד שנפסל.
 
 const { normalizeSku, numericSkuKey } = require("./customerPriceList");
+// אותו נרמול שמנוע ההתאמה משתמש בו — ראה ההסבר ב-utils/productAliases על
+// למה שני נרמולים שונים הם כשל שקט
+const { normalizeTitleForMatch } = require("./productMatching");
 
 // ── כמה זמן קנייה נשארת רלוונטית ──
 //
@@ -238,6 +241,44 @@ const pickFromHistory = (candidates = [], profile = null, { now = Date.now() } =
   return { product: top.product, tier, evidence: hits, reason: describeEvidence(hits) };
 };
 
+/**
+ * האם כל מה שהלקוח כתב מופיע בשם המוצר.
+ *
+ * ── למה זה קיים ──
+ *
+ * שורה שהלקוח כתב **בלי כמות** היא ניחוש של הפרסר שמדובר בפריט בכלל. נמדד על
+ * הזמנות אמיתיות ששורות כאלה כוללות גם כתובות וחתימות:
+ *
+ *     "הרצל 5 בני ברק"   התאים למוצר בציון 0.47
+ *     "קומה 3 דירה 12"   0.6
+ *     "מגבות נייר"       0.53   ← מוצר אמיתי
+ *
+ * הטווחים חופפים, ולכן ביטחון אינו יכול להפריד ביניהם. מה שכן מפריד: **שם
+ * מוצר הוא תיאור של המוצר.** מי שכתב "קפה טורקי" כתב שתי מילים שנמצאות שתיהן
+ * בשם המוצר; מי שכתב "קומה 3 דירה 12" לא יימצא מוצר שנושא גם "קומה" וגם
+ * "דירה".
+ *
+ * הדרישה מוחלת **רק** על שורות בלי כמות. שורה שהלקוח כתב לה מספר כבר הצהירה
+ * שהיא פריט, ואין סיבה לדרוש ממנה גם ניסוח מלא.
+ *
+ * מילים בנות תו אחד מדולגות, כמו במנוע ההתאמה: הן רועשות מכדי להעיד על דבר.
+ */
+const coversAllWords = (text, product) => {
+  const words = normalizeTitleForMatch(text)
+    .split(" ")
+    .filter((word) => word.length > 1);
+  if (!words.length) return false;
+
+  const title = new Set(
+    [product?.title?.he, product?.title?.en]
+      .filter(Boolean)
+      .flatMap((value) => normalizeTitleForMatch(value).split(" "))
+  );
+
+  // מילה שלמה ולא substring: "תה" אינו נחשב מופיע בתוך "מתה" או "פתה"
+  return words.every((word) => title.has(word));
+};
+
 const roundMonths = (monthsAgo) => Math.max(1, Math.round(monthsAgo));
 
 /**
@@ -267,6 +308,7 @@ module.exports = {
   buildPurchaseProfile,
   pickFromHistory,
   describeEvidence,
+  coversAllWords,
   // מיוצאים לבדיקות ולכיול הספים
   FRESH_MONTHS,
   REPEAT_LINES,
