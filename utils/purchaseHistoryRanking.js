@@ -29,6 +29,7 @@ const { normalizeSku, numericSkuKey } = require("./customerPriceList");
 // אותו נרמול שמנוע ההתאמה משתמש בו — ראה ההסבר ב-utils/productAliases על
 // למה שני נרמולים שונים הם כשל שקט
 const { normalizeTitleForMatch } = require("./productMatching");
+const { canonicalWords } = require("./orderWording");
 
 // ── כמה זמן קנייה נשארת רלוונטית ──
 //
@@ -38,9 +39,32 @@ const { normalizeTitleForMatch } = require("./productMatching");
 const RECENCY_MONTHS_SCALE = 12;
 
 // קנייה בחצי השנה האחרונה נחשבת "עדכנית". זה הסף שמאפשר לקנייה **חד-פעמית**
-// להכריע: מוצר שנקנה פעם אחת לפני שבועיים הוא הזמנה שוטפת, ומוצר שנקנה פעם
-// אחת לפני שנתיים ומעולם לא שוב הוא כנראה טעות או ניסיון חד-פעמי.
+// להכריע כשיש לה מתחרה: מוצר שנקנה פעם אחת לפני שבועיים הוא הזמנה שוטפת.
 const FRESH_MONTHS = 6;
+
+// ── קנייה חד-פעמית **בלי מתחרה** ──
+//
+// ‏FRESH_MONTHS כויל על מוצרי מכולת: חלב, קפה וסוכר נקנים שבועית, ומוצר
+// שנעלם לחצי שנה כנראה הוחלף. ציוד משרדי נקנה בקצב אחר לגמרי — קלסר, שדכן
+// ומחברת נקנים פעם בשנה.
+//
+// נמדד בהזמנה אמיתית: הלקוח כתב "קלסר", בקטלוג 15 קלסרים, והוא קנה בדיוק
+// אחד מהם — פעם אחת, לפני 8.7 חודשים. הכלל החזיר רמז, השורה נשארה בביטחון
+// 0.53, ו**כל ההזמנה** נפלה ל"לא הובנה במלואה" (הביטחון הכולל הוא המינימום
+// מבין הפריטים). שלושת הפריטים האחרים נפתרו ב-0.9.
+//
+// ── למה מותר להאריך דווקא כאן ──
+//
+// דעיכת העדכניות נועדה לתפוס **החלפת העדפה**. כשהלקוח קנה מוצר אחד ויחיד
+// מתוך הבריכה, אין שום ראיה שההעדפה השתנתה — אין מתחרה שהוא עבר אליו. הסיכוי
+// שדווקא זה שהוא נגע בו מתוך 15 הוא צירוף מקרים הוא 1 ל-15.
+//
+// כשיש **כמה** מועמדים בהיסטוריה, המצב הפוך: הלקוח קונה יותר מאחד, ואז
+// חד-פעמיות ישנה חייבת להיות טרייה כדי לגבור. שם FRESH_MONTHS ממשיך לחול.
+//
+// התקרה קיימת כדי שקנייה בודדת מלפני שנים לא תכריע לנצח.
+const SINGLE_HIT_MAX_MONTHS =
+  Number(process.env.INGESTION_HISTORY_SINGLE_HIT_MONTHS) || 24;
 
 // כמה קניות הופכות מוצר ל"רגיל אצל הלקוח" גם בלי עדכניות
 const REPEAT_LINES = 2;
@@ -232,8 +256,13 @@ const pickFromHistory = (candidates = [], profile = null, { now = Date.now() } =
   const top = hits[0];
   const runnerUp = hits[1];
 
-  // מוצר שנקנה פעם אחת מזמן אינו "מה שהלקוח קונה" — הוא אירוע בודד
-  const topIsEstablished = top.lines >= REPEAT_LINES || top.monthsAgo <= FRESH_MONTHS;
+  // ── מתי קנייה בודדת נחשבת "מה שהלקוח קונה" ──
+  //
+  // חלון העדכניות תלוי בשאלה אם יש מתחרה. מועמד יחיד מההיסטוריה = אין ראיה
+  // שההעדפה השתנתה, ולכן מספיק שהקנייה אינה עתיקה. כמה מועמדים = הלקוח קונה
+  // יותר מאחד, וחד-פעמיות חייבת להיות טרייה. ראה SINGLE_HIT_MAX_MONTHS.
+  const freshnessWindow = hits.length === 1 ? SINGLE_HIT_MAX_MONTHS : FRESH_MONTHS;
+  const topIsEstablished = top.lines >= REPEAT_LINES || top.monthsAgo <= freshnessWindow;
 
   const dominant = !runnerUp || top.weight >= runnerUp.weight * DOMINANCE_RATIO;
   const tier = topIsEstablished && dominant ? "decisive" : "hint";
@@ -264,15 +293,19 @@ const pickFromHistory = (candidates = [], profile = null, { now = Date.now() } =
  * מילים בנות תו אחד מדולגות, כמו במנוע ההתאמה: הן רועשות מכדי להעיד על דבר.
  */
 const coversAllWords = (text, product) => {
-  const words = normalizeTitleForMatch(text)
-    .split(" ")
-    .filter((word) => word.length > 1);
+  // ── שני הצדדים בצורה קנונית ──
+  //
+  // "חלב 3 אחוז" מול "חלב טרי 3%" אינו עמימות — זו אותה מילה בניסוח אחר,
+  // ובלי הנרמול היא נראית כשורה שאינה מתארת מוצר. ראה utils/orderWording.
+  // נמדד: 17 מתוך 18 ניסוחים חופשיים של מוצרים אמיתיים נכנסים, ו-0 מתוך 30
+  // ביטויי שיחה.
+  const words = canonicalWords(text);
   if (!words.length) return false;
 
   const title = new Set(
     [product?.title?.he, product?.title?.en]
       .filter(Boolean)
-      .flatMap((value) => normalizeTitleForMatch(value).split(" "))
+      .flatMap((value) => canonicalWords(value))
   );
 
   // מילה שלמה ולא substring: "תה" אינו נחשב מופיע בתוך "מתה" או "פתה"
@@ -310,6 +343,7 @@ module.exports = {
   coversAllWords,
   // מיוצאים לבדיקות ולכיול הספים
   FRESH_MONTHS,
+  SINGLE_HIT_MAX_MONTHS,
   REPEAT_LINES,
   DOMINANCE_RATIO,
 };

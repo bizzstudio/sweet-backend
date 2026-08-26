@@ -22,6 +22,8 @@
     "ingest:filter-test": "node script/test-conversation-filter.js",
     "ingest:guard-test": "node script/test-order-table-guard.js",
     "ingest:lines-test": "node script/test-order-lines.js",
+    "ingest:replay": "node script/replay-failed-orders.js",
+    "vocab:test": "node script/test-catalog-vocabulary.js",
     "order:delete-error": "node script/delete-ingestion-error-order.js",
     "import:preflight": "node script/import-preflight.js",
     "stock:set": "node script/set-stock.js",
