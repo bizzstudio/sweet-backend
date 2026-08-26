@@ -21,6 +21,7 @@
     "ingest:reclassify": "node script/reclassify-conversations.js",
     "ingest:filter-test": "node script/test-conversation-filter.js",
     "ingest:guard-test": "node script/test-order-table-guard.js",
+    "ingest:lines-test": "node script/test-order-lines.js",
     "order:delete-error": "node script/delete-ingestion-error-order.js",
     "import:preflight": "node script/import-preflight.js",
     "stock:set": "node script/set-stock.js",
