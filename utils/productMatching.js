@@ -16,6 +16,60 @@ const {
   createApostropheIgnoringRegex,
 } = require("./voiceParser");
 
+// ── גודל הבריכה לשלבי סינון פנימיים ──
+//
+// ‏alternativesCount היא רשימה **לתצוגה ולהכרעה חיצונית**, וקצרה בכוונה: היא
+// נשמרת על ההזמנה ונשלחת ל-LLM, ואורך עולה שם כסף ורעש. ‏pool היא מה שמקבל מי
+// שמסנן בעצמו — מזהי הגרסה, שובר השוויון של המק"ט, היסטוריית הרכישות, ורשימת
+// "בחר מוצר" של העובד.
+//
+// למה זה נדרש: נמדד על "קלסר" מהזמנה אמיתית — 15 מוצרים בקטלוג, כולם בטווח
+// 12023.6–12026.4, כלומר הפרש של 2.8 נקודות מתוך 12,026 (0.02%) שמקורו בקנס
+// אורך שם. המוצר שהלקוח קונה בפועל דורג במקום 11, וחלון של 9 חתך אותו. זה
+// אינו סינון אלא חיתוך שרירותי באמצע ערימה של מועמדים זהים כמעט לגמרי.
+//
+// ── למה הקבוע יושב **כאן** ──
+//
+// שלושה מסלולים נפרדים חייבים לראות את אותה בריכה: הצינור שמכריע, המדידה
+// שמבטיחה מראש "כך יקרה", והרשימה שהעובד בוחר ממנה. ערך שכתוב שלוש פעמים
+// נפרד ביום שבו מישהו משנה אחד מהם — והתוצאה היא בדיוק ההבטחה השבורה:
+// התצוגה המקדימה מבטיחה מספר אחד, הקליטה עושה אחר.
+//
+// 19 ולא יותר: הבריכה חסומה ממילא ב-candidateLimit (20 מסמכים מה-DB), ולכן
+// זהו בדיוק "כל מה שנשלף ודורג" בלי שאילתה נוספת.
+const CANDIDATE_POOL_SIZE = 19;
+
+// ── תקרת השליפה כשיש במה לאמת את התוצאה ──
+//
+// ‏candidateLimit ברירת המחדל הוא 20 **מסמכים מה-DB**, ובלי מיון. כלומר
+// כשהשאילתה תואמת ליותר מ-20 מוצרים, אלה שנשלפים הם שרירותיים לחלוטין —
+// החיתוך קורה **לפני** שיש ציונים בכלל. מדידה על הקטלוג (4,320 מוצרים):
+//
+//     "נייר"  156 מוצרים · "תה" 148 · "כוסות" 91 · "קפה" 75 · "שוקולד" 73
+//
+// ‏145 מילים שונות בקטלוג מחזירות מעל 20 מוצרים. בכל אחת מהן "המועמד המוביל"
+// הוא המוביל מבין 20 אקראיים, ולא מבין כל מי שתואם.
+//
+// 300 מכסה כל מילה שהיא **שם מוצר** בקטלוג הזה. שש המילים שמעליה (קג,
+// יחידות, ליטר, יח, גר, יחידה — עד 339) הן מילות מידה, ואינן מופיעות לבדן
+// כשורת הזמנה.
+//
+// ── למה זה אינו ברירת המחדל ──
+//
+// המחיר הוא סריקת אוסף מלאה: השאילתה היא רגקסים על כותרת, שאף אינדקס אינו
+// משרת, ולכן תקרה נמוכה מאפשרת ל-mongo לעצור מוקדם. 4,320 מסמכים קטנים הם
+// עשרות מילישניות לשורה — זניח בעיבוד רקע, אבל לא משהו שמדליקים לכולם בלי
+// סיבה.
+//
+// הסיבה שמצדיקה אותו היא **אימות**: כשללקוח יש היסטוריית רכישות, יש למערכת
+// דרך עצמאית לוודא איזה מהמועמדים הוא הנכון. בלי היסטוריה, בריכה רחבה רק
+// מחליפה ניחוש אחד באחר.
+const HISTORY_CANDIDATE_LIMIT = 300;
+
+// כמה מסמכים נשלפים כברירת מחדל. מוגדר כקבוע כדי שהשליפה הקלה (ראה
+// matchProductByName) תדע מתי היא במצב "רחב" בלי מספר קסם שני.
+const DEFAULT_CANDIDATE_LIMIT = 20;
+
 // אורך מרבי של שם שנשלח לחיפוש. ראה הנימוק המלא ב-matchProductByName —
 // בקצרה: בלי חסם, שורת פריט ארוכה במייל של לקוח מפילה את השרת ב-OOM.
 const MAX_SEARCH_NAME_LENGTH = 200;
@@ -276,6 +330,9 @@ const scoreToConfidence = (topScore, runnerUpScore = 0, { exactTitleMatch = fals
  *        בעצמה, כדי שתוכל להסביר בדיוק מה חסר.
  * @param {number}  [options.candidateLimit=20] - מקסימום מועמדים מה-DB
  * @param {number}  [options.alternativesCount=4] - כמה חלופות להחזיר לתיעוד/הכרעה
+ * @param {number}  [options.poolCount=alternativesCount] - כמה מועמדים להחזיר
+ *        ב-`pool`, לצרכנים שמסננים בעצמם (מזהי גרסה, היסטוריית רכישות).
+ *        ראה ההסבר על `pool` בערך המוחזר.
  * @returns {Promise<null|{product: Object, score: number, confidence: number, quantityFromText: number, query: string, alternatives: Array}>}
  */
 const matchProductByName = async (rawName, options = {}) => {
@@ -283,8 +340,9 @@ const matchProductByName = async (rawName, options = {}) => {
     includeStoreProducts = false,
     requireStock = true,
     requireShown = true,
-    candidateLimit = 20,
+    candidateLimit = DEFAULT_CANDIDATE_LIMIT,
     alternativesCount = 4,
+    poolCount = alternativesCount,
   } = options;
 
   if (!rawName || typeof rawName !== "string" || !rawName.trim()) return null;
@@ -349,8 +407,24 @@ const matchProductByName = async (rawName, options = {}) => {
     ...(includeStoreProducts ? {} : { isStoreProduct: { $ne: true } }),
   };
 
-  const search = (conditions, limit) =>
-    Product.find({ ...baseFilter, $or: conditions }).lean().limit(limit);
+  // ── שליפה רחבה מושכת מסמכים קלים בלבד ──
+  //
+  // המסמך המלא נדרש **רק למועמד המוביל**: כל השאר עוברים דרך `thin()` ומאבדים
+  // ממילא את כל השדות מלבד מזהה, כותרת ומק"ט. שליפה רחבה בלי projection הייתה
+  // מושכת מאות מסמכים שלמים — עם description, image, variants ו-erp — כדי
+  // להשתמש באחד מהם. הפרויקציה מכסה את מה שהדירוג, ה-baseFilter והשוואת
+  // השמות צריכים, והמוביל נשלף מחדש במלואו אחריה.
+  //
+  // ‏prices **אינו** בפרויקציה במכוון: הקוד שמעלינו מזהה מסמך רזה בדיוק לפי
+  // `product.prices === undefined` (ראה resolvers), ומסמך חלקי שנראה מלא היה
+  // מגיע לעגלה בלי תמונה, slug ומחירים — כשל שקט לגמרי.
+  const lightFetch = candidateLimit > DEFAULT_CANDIDATE_LIMIT;
+  const LIGHT_SELECT = "_id sku title status stock isStoreProduct";
+
+  const search = (conditions, limit) => {
+    const query = Product.find({ ...baseFilter, $or: conditions }).lean().limit(limit);
+    return lightFetch ? query.select(LIGHT_SELECT) : query;
+  };
 
   let products = await search(searchConditions, candidateLimit);
 
@@ -422,22 +496,62 @@ const matchProductByName = async (rawName, options = {}) => {
     isExactTitle(best.product) && !(runnerUp && isExactTitle(runnerUp.product));
 
 
+  const thin = (r) => ({
+    _id: r.product._id,
+    title: r.product.title,
+    sku: r.product.sku,
+    score: r.score,
+  });
+
+  // מיפוי אחד לשתי הרשימות: ‏alternatives הוא תמיד רישא של pool, ולכן אין
+  // טעם לבנות את אותם אובייקטים פעמיים
+  const rest = ranked
+    .slice(1, 1 + Math.max(alternativesCount, poolCount))
+    .map(thin);
+
+  // ── המוביל חוזר לצורתו המלאה ──
+  //
+  // בשליפה רחבה הוא הגיע מפורייקטד, ומכאן הוא ממשיך לבדיקת הזמינות, לתמחור
+  // ולבניית שורת העגלה — שכולן קוראות שדות שאינם בפרויקציה.
+  //
+  // ‏null פירושו שהמוצר נמחק בין שתי השאילתות. מחזירים "לא נמצא" ולא מסמך
+  // חלקי: הראשון הוא מצב שהקורא כבר יודע לטפל בו, השני נכנס להזמנה שבורה.
+  let leader = best.product;
+  if (lightFetch) {
+    leader = await Product.findById(best.product._id).lean();
+    if (!leader) return null;
+  }
+
   return {
-    product: best.product,
+    product: leader,
     score: best.score,
     confidence: scoreToConfidence(best.score, runnerUp?.score || 0, { exactTitleMatch }),
     quantityFromText: quantity,
     query,
-    alternatives: ranked.slice(1, 1 + alternativesCount).map((r) => ({
-      _id: r.product._id,
-      title: r.product.title,
-      sku: r.product.sku,
-      score: r.score,
-    })),
+    alternatives: rest.slice(0, alternativesCount),
+
+    // ── pool: כל מה שדורג, ולא רק החלופות המוצגות ──
+    //
+    // ‏alternatives הן רשימה **לתצוגה ולהכרעה חיצונית** ולכן היא קצרה בכוונה:
+    // היא נשמרת על ההזמנה ונשלחת ל-LLM, ואורך עולה שם כסף ורעש.
+    //
+    // אבל שלבים שמסננים בעצמם (מזהי גרסה, היסטוריית רכישות) צריכים את הבריכה
+    // המלאה, כי החיתוך הקצר הוא **שרירותי ולא משמעותי**. נמדד על "קלסר": 15
+    // מוצרים בקטלוג, כולם בטווח 12023.6–12026.4 — הפרש של 2.8 נקודות מתוך
+    // 12,026, כלומר 0.02%. חלון של 9 חתך שישה מהם, וביניהם דווקא זה שהלקוח
+    // קונה. הפרש כזה הוא רעש של קנס אורך, ואינו מפריד בין מוצר נכון ללא נכון.
+    //
+    // הבריכה חסומה ממילא ב-candidateLimit — היא לא יכולה לגדול מעבר למה
+    // שנשלף מה-DB, ולכן אין כאן עלות שאילתה נוספת.
+    pool: rest.slice(0, poolCount),
   };
 };
 
 module.exports = {
+  // המקור היחיד לגדלים. כל מי שמסנן בעצמו מייבא אותם מכאן ואינו כותב מספר
+  // משלו — ראה ההסבר למעלה.
+  CANDIDATE_POOL_SIZE,
+  HISTORY_CANDIDATE_LIMIT,
   // מיוצא כדי ש-utils/productAliases ינרמל בדיוק כמו מנוע ההתאמה. שני נרמולים
   // שונים היו גורמים לאליאס שנשמר לא להימצא לעולם — ראה שם.
   normalizeTitleForMatch,

@@ -34,7 +34,11 @@ const {
 const { readAttachment, MAX_ATTACHMENT_BYTES } = require("../lib/attachment-reader");
 const Customer = require("../models/Customer");
 const Product = require("../models/Product");
-const { matchProductByName } = require("../utils/productMatching");
+const {
+  matchProductByName,
+  CANDIDATE_POOL_SIZE,
+  HISTORY_CANDIDATE_LIMIT,
+} = require("../utils/productMatching");
 const { findAliasMatch, saveAlias } = require("../utils/productAliases");
 const { extractQualifiers } = require("../lib/order-ingestion/qualifiers");
 const { canonicalPhone } = require("../utils/phone");
@@ -717,6 +721,20 @@ const getItemCandidates = async (req, res) => {
         requireShown: false,
         requireStock: false,
         alternativesCount: 9,
+        // ── הרשימה הזו היא כל מה שהעובד יכול לבחור מתוכו ──
+        //
+        // אין בה חיפוש חופשי, ולכן מועמד שנחתך מהרשימה אינו רק "לא מוצג" —
+        // הוא **בלתי ניתן לבחירה**. נמדד על "קלסר": 15 מוצרים בקטלוג בטווח
+        // 0.02% זה מזה, והמוצר שהלקוח קונה בפועל דורג במקום 11. עם חלון של
+        // 10 העובד היה מסתכל ברשימה, לא מוצא אותו, ולא היה לו מה לעשות.
+        poolCount: CANDIDATE_POOL_SIZE,
+        // ── שליפה רחבה, תצוגה קצרה ──
+        //
+        // הרשימה שמוצגת נשארת 20, כי רשימה ארוכה יותר אינה שמישה לבחירה ידנית.
+        // אבל היא נחתכת עכשיו **אחרי הדירוג ולא לפניו**: קודם נשלפו 20 מוצרים
+        // שרירותיים מה-DB והוצגו כמו שהם, ועכשיו נשלף כל מי שתואם ומוצגים
+        // 20 הרלוונטיים ביותר. זו פעולה של אדם שלוחץ על שורה, לא נתיב חם.
+        candidateLimit: HISTORY_CANDIDATE_LIMIT,
       }),
       findAliasMatch(searchName, order.user),
     ]);
@@ -737,7 +755,7 @@ const getItemCandidates = async (req, res) => {
       };
     };
 
-    const pool = match ? [match.product, ...(match.alternatives || [])] : [];
+    const pool = match ? [match.product, ...(match.pool || match.alternatives || [])] : [];
 
     // ── שליפה אחת לכל החלופות, לא אחת לכל חלופה ──
     //

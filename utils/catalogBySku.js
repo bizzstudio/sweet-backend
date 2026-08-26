@@ -11,6 +11,14 @@
 //
 // הכלל בכל המודול: **התאמה מדויקת קודמת תמיד, והצורה המספרית היא נפילה בלבד.**
 
+// ── למה זה אינו משמש גם את המחירון ──
+//
+// ‏controller/customerPriceListController מחזיק פונקציות דומות משלו, ואיחודן
+// לכאן נראה מתבקש — אבל השתיים **אינן זהות**: כשהקטלוג מכיל שני מוצרים באותו
+// מק"ט (יש כ-108 קבוצות כפילויות), שם מנצח האחרון שנשלף וכאן מנצח הראשון.
+// ההבדל הזה קובע לאיזה מוצר שורת מחירון נצמדת, כלומר כמה הלקוח משלם.
+// מיזוגן הוא שינוי תמחור שדורש אימות משלו, ולא ניקוי צד.
+
 const Product = require("../models/Product");
 const { normalizeSku, numericSkuKey } = require("./customerPriceList");
 
@@ -63,30 +71,6 @@ const fetchCatalogBySku = async (skus, select = "_id sku title status prices.pri
   return bySku;
 };
 
-/**
- * "אילו מק"טים בכלל קיימים" — בלי המסמכים.
- *
- * מופרד מ-fetchCatalogBySku כי הספירה "כמה מהקובץ קיים בקטלוג" נמדדת על **כל**
- * השורות (יכולות להיות אלפים), ואילו הפרטים נדרשים רק לעמוד המוצג.
- */
-const fetchExistingSkus = async (skus) => {
-  const set = new Set();
-  const unique = [...new Set(skus.map(normalizeSku).filter(Boolean))];
-
-  for (let i = 0; i < unique.length; i += CHUNK_SIZE) {
-    const values = await Product.distinct("sku", skuQuery(unique.slice(i, i + CHUNK_SIZE)));
-    values.forEach((value) => {
-      const sku = normalizeSku(value);
-      if (!sku) return;
-      set.add(sku);
-      const alias = numericSkuKey(sku);
-      if (alias) set.add(alias);
-    });
-  }
-
-  return set;
-};
-
 const lookupCatalog = (catalogBySku, sku) => {
   const key = normalizeSku(sku);
   if (catalogBySku.has(key)) return catalogBySku.get(key);
@@ -94,18 +78,4 @@ const lookupCatalog = (catalogBySku, sku) => {
   return alias ? catalogBySku.get(alias) || null : null;
 };
 
-const existsInCatalog = (existingSkus, sku) => {
-  const key = normalizeSku(sku);
-  if (existingSkus.has(key)) return true;
-  const alias = numericSkuKey(key);
-  return Boolean(alias && existingSkus.has(alias));
-};
-
-module.exports = {
-  CHUNK_SIZE,
-  skuQuery,
-  fetchCatalogBySku,
-  fetchExistingSkus,
-  lookupCatalog,
-  existsInCatalog,
-};
+module.exports = { fetchCatalogBySku, lookupCatalog };

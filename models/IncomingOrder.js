@@ -56,6 +56,11 @@ const matchedItemSchema = new mongoose.Schema(
     matchScore: { type: Number, required: false },
     // 'catalog' = הוכרע ע"י מנוע ההתאמה, 'llm' = הוכרע ע"י ה-LLM מבין מועמדים
     decidedBy: { type: String, required: false },
+    // המערכת בחרה את המוצר מבין כמה מועמדים כמעט זהים במקום להעביר את השורה
+    // לאדם (ראה autoPick ב-resolvers). שדה נפרד ולא תת-מחרוזת של decidedBy:
+    // זו הכרעה של המנוע שהמסך חייב לסמן, בדיוק כמו quantityAssumed, ומסך
+    // שמחפש אותה בתוך מחרוזת חופשית נשבר בשקט ברגע שמנסחים אותה מחדש.
+    autoPicked: { type: Boolean, required: false, default: false },
 
     // חלופות שנשקלו — קריטי לתחקור טעות זיהוי
     alternatives: { type: Array, required: false, default: [] },

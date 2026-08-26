@@ -16,20 +16,21 @@ const mongoose = require("mongoose");
 const CustomerPurchaseHistory = require("../models/CustomerPurchaseHistory");
 const Customer = require("../models/Customer");
 const Order = require("../models/Order");
-const {
-  fetchCatalogBySku,
-  fetchExistingSkus,
-  lookupCatalog,
-  existsInCatalog,
-} = require("../utils/catalogBySku");
+const { fetchCatalogBySku, lookupCatalog } = require("../utils/catalogBySku");
 const { normalizeSku } = require("../utils/customerPriceList");
-const { matchProductByName } = require("../utils/productMatching");
+const {
+  matchProductByName,
+  HISTORY_CANDIDATE_LIMIT,
+} = require("../utils/productMatching");
 const { findAliasMatch } = require("../utils/productAliases");
 const {
   buildPurchaseProfile,
   pickFromHistory,
 } = require("../utils/purchaseHistoryRanking");
-const { extractQualifiers } = require("../lib/order-ingestion/qualifiers");
+const {
+  extractQualifiers,
+  applyQualifiers,
+} = require("../lib/order-ingestion/qualifiers");
 
 // ── תקרה לשורות בבקשה אחת ──
 //
@@ -344,7 +345,8 @@ const measureImpact = async (customerId, profile) => {
   const measureLine = async (line) => {
     // אותו ניקוי מזהים שהצינור עושה לפני החיפוש — אחרת המדידה תרוץ על שאילתה
     // אחרת מזו שתרוץ באמת
-    const { cleanName, negations } = extractQualifiers(line.rawName);
+    const qualifiers = extractQualifiers(line.rawName);
+    const { cleanName, negations } = qualifiers;
     const searchName = cleanName || line.rawName;
 
     // שורה שכבר יש עליה הכרעה אנושית אינה "תקועה בגלל היעדר היסטוריה" —
@@ -357,6 +359,11 @@ const measureImpact = async (customerId, profile) => {
         requireShown: false,
         requireStock: false,
         alternativesCount: 8,
+        // אותם קבועים שהצינור משתמש בהם, מיובאים ולא משוכפלים: המדידה מבטיחה
+        // "כך יקרה", ובריכה בגודל אחר הופכת אותה להבטחה שאינה מתקיימת.
+        // הבדיקה רצה תמיד במצב "יש היסטוריה" — זו בדיוק השאלה הנבדקת.
+        candidateLimit: HISTORY_CANDIDATE_LIMIT,
+        poolCount: HISTORY_CANDIDATE_LIMIT,
       });
     } catch {
       // כשל בהתאמה של שורה אחת אינו מבטל את המדידה כולה — הוא רק שורה
@@ -365,10 +372,21 @@ const measureImpact = async (customerId, profile) => {
     }
     if (!match) return null;
 
-    const pool = [
-      { product: match.product },
-      ...(match.alternatives || []).map((alt) => ({ product: alt })),
+    // ── אותו סינון בדיוק שהצינור מריץ ──
+    //
+    // בלעדיו המדידה רצה על בריכה רחבה יותר מזו שההיסטוריה תראה בפועל, ולכן
+    // מבטיחה יותר שורות נפתרות ממה שייפתר. מספר שמבטיח יתר גרוע ממספר שאינו
+    // מוצג: מי שקורא אותו מחליט לפיו אם הקובץ שווה את הזמן.
+    const widePool = [
+      { product: match.product, score: match.score },
+      ...(match.pool || match.alternatives || []).map((alt) => ({
+        product: alt,
+        score: alt.score,
+      })),
     ];
+    const pool = applyQualifiers(widePool, qualifiers).keptBeforeSilentDrops.map((k) => ({
+      product: k.product,
+    }));
 
     const pick = pickFromHistory(pool, profile);
     if (!pick) return null;

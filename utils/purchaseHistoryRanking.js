@@ -307,7 +307,6 @@ const describeEvidence = (hits = []) => {
 module.exports = {
   buildPurchaseProfile,
   pickFromHistory,
-  describeEvidence,
   coversAllWords,
   // מיוצאים לבדיקות ולכיול הספים
   FRESH_MONTHS,

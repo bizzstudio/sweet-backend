@@ -353,6 +353,214 @@ check(
 
 // ───────────────────────────────────────────────────────────────
 
+section('רגרסיה: "קלסר" — המוצר שנחתך מחוץ לחלון');
+
+// ── מה קרה בפועל ──
+//
+// לקוח כתב "6 קלסר". בקטלוג 15 מוצרי קלסר, והמוצר שהוא קונה (2053) דורג
+// במקום 11. חלון החלופות היה 9, ולכן הוא נחתך — וההיסטוריה מעולם לא ראתה
+// אותו. השורה הגיעה לטיפול ידני למרות שהתשובה הייתה בקובץ.
+//
+// ההפרש שהכריע: 12024.2 מול 12026.4 — 2.2 נקודות מתוך 12,026, כלומר 0.02%
+// שמקורו בקנס אורך שם. זה רעש, ולא הבדל שמצדיק חיתוך.
+//
+// הבדיקה מריצה את מנוע הדירוג האמיתי על 15 השמות האמיתיים.
+const { rankProductsByRelevance } = require("../utils/productMatching");
+
+const BINDERS = [
+  ["51", "קלסר גב 8 משרדי צבעוני 1 יח' (ח')"],
+  ["718", "קלסר פרה גב 8 משרדי 1 יח' (ח')"],
+  ["796", "קלסר גב 5 משרדי פרה 1 יחידה"],
+  ["1506", "קלסר חצי פוליו רחב"],
+  ["2053", "קלסר משרדי פרה גב 8 גדול 1 יח"], // זה שהלקוח קונה
+  ["3726", "קלסר חצי שקוף 1 יח'"],
+  ["3794", "קלסר משרדי עבה גב 8 מפלסטיק  1 יח'"],
+  ["3899", "קלסר משרדי דק  גב 5 מפלסטיק 1 יח'"],
+  ["3981", "קלסר משרדי גב 8 צבעוני פלסטיק"],
+  ["4007", "קלסר גב 3 פרה 1 יחידה"],
+  ["4103", "קלסר חצי פוליו רחב צבעוני"],
+  ["4177", "קלסר/ תיק טבעות דק פלסטיק"],
+  ["4290", "קלסר גב 5 משרדי צבעוני(ח')"],
+  ["3153", "קלסר גב 5 משרדי 1 יח' (ח')"],
+  ["3279", "קלסר חצי שקוף צבעוני 1 יחידה(ח')"],
+];
+
+const binderRanked = rankProductsByRelevance(
+  BINDERS.map(([sku, he]) => ({ _id: sku, sku, title: { he } })),
+  "קלסר",
+  ["קלסר"],
+  []
+);
+
+// הפרופיל: הלקוח קנה את 2053 פעם אחת, לפני חודשיים
+const binderProfile = buildPurchaseProfile([
+  { sku: "2053", product: "2053", lines: 1, lastAt: monthsAgo(2) },
+]);
+
+const poolOf = (size) => binderRanked.slice(0, size).map((r) => ({ product: r.product }));
+
+check(
+  "המוצר של הלקוח אינו במקומות הראשונים",
+  binderRanked.findIndex((r) => r.product.sku === "2053") + 1,
+  11
+);
+
+// זה מה שהיה קורה לפני התיקון: חלון של 9 (מוביל + 8 חלופות)
+check("חלון של 9 מפספס אותו לגמרי", tierOf(pickFromHistory(poolOf(9), binderProfile, { now: NOW })), "אין אות");
+
+// וזה מה שקורה עכשיו
+const binderPick = pickFromHistory(poolOf(20), binderProfile, { now: NOW });
+check("הבריכה המלאה מוצאת אותו", chosenOf(binderPick), "קלסר משרדי פרה גב 8 גדול 1 יח");
+check("וההכרעה ודאית — קנייה אחת אך עדכנית", tierOf(binderPick), "decisive");
+
+// ── ולמה זה לא הופך את המנגנון לרשלני ──
+//
+// בריכה רחבה יכולה גם להוריד הכרעה לרמז, כשמתגלה שהלקוח קונה **כמה** מהם.
+// זו התוצאה הנכונה: החלון הצר נתן ביטחון שגוי, כי הוא הסתיר מתחרה אמיתי.
+check(
+  "כשגם מוצר שני בבריכה נקנה — יורד לרמז, ולא מכריע בטעות",
+  tierOf(
+    pickFromHistory(
+      poolOf(20),
+      buildPurchaseProfile([
+        { sku: "2053", product: "2053", lines: 1, lastAt: monthsAgo(2) },
+        { sku: "1506", product: "1506", lines: 1, lastAt: monthsAgo(2) },
+      ]),
+      { now: NOW }
+    )
+  ),
+  "hint"
+);
+
+// ───────────────────────────────────────────────────────────────
+
+section("רגרסיה: כלל השתיקה מוחק בדיוק את מה שההיסטוריה יודעת");
+
+// ── מה נמדד ──
+//
+// ‏applyQualifiers מסיים בכלל של שתיקה: "הלקוח לא כתב 50 יח, מכאן שלא רצה
+// 50 יח". אצל לקוח אמיתי הכלל הזה מחק בדיוק את המוצרים שהוא קונה בקביעות:
+//
+//     "כפיות"      21 מועמדים → 6    (הכפיות שהוא קונה 4 פעמים נמחקו)
+//     "נייר טואלט" 27 → 8
+//     "כוסות"      91 → 2
+//
+// בכל השלושה ההיסטוריה החזירה "אין אות" — לא כי לא ידעה, אלא כי המוצר סולק
+// לפני שהגיעה אליו. לכן היא עובדת מול keptBeforeSilentDrops.
+const { applyQualifiers, extractQualifiers } = require("../lib/order-ingestion/qualifiers");
+
+const SPOONS = [
+  { _id: "s1", sku: "1308", title: { he: "כפיות ח.פעמי שקוף קשיח 50 יח" } },
+  { _id: "s2", sku: "380", title: { he: "כפיות חד פעמי 100 יח" } },
+  { _id: "s3", sku: "s3", title: { he: "כפיות מתכת" } },
+];
+
+const spoonRes = applyQualifiers(
+  SPOONS.map((p, i) => ({ product: p, score: 1000 - i })),
+  extractQualifiers("כפיות")
+);
+
+check("כלל השתיקה אכן מסלק את בעלות המניין", spoonRes.kept.length, 1);
+check("והבריכה שלפניו שומרת את כולן", spoonRes.keptBeforeSilentDrops.length, 3);
+
+const spoonProfile = buildPurchaseProfile([
+  { sku: "1308", product: "s1", lines: 4, lastAt: monthsAgo(2) },
+]);
+
+check(
+  "מול kept — ההיסטוריה עיוורת",
+  tierOf(pickFromHistory(spoonRes.kept.map((k) => ({ product: k.product })), spoonProfile, { now: NOW })),
+  "אין אות"
+);
+check(
+  "מול keptBeforeSilentDrops — היא מזהה",
+  chosenOf(
+    pickFromHistory(
+      spoonRes.keptBeforeSilentDrops.map((k) => ({ product: k.product })),
+      spoonProfile,
+      { now: NOW }
+    )
+  ),
+  "כפיות ח.פעמי שקוף קשיח 50 יח"
+);
+
+// ── והגבול שלא נפרץ ──
+//
+// כלל השתיקה הוא ניחוש, ולכן ההיסטוריה גוברת עליו. שלילה מפורשת אינה ניחוש —
+// היא המשפט היחיד שהלקוח טרח לכתוב — והיא מסננת **לפני** נקודת החיתוך.
+const negRes = applyQualifiers(
+  SPOONS.map((p, i) => ({ product: p, score: 1000 - i })),
+  extractQualifiers("כפיות (לא 50 יח)")
+);
+check(
+  "שלילה מפורשת מסלקת גם מהבריכה שלפני כלל השתיקה",
+  negRes.keptBeforeSilentDrops.some((k) => k.product._id === "s1"),
+  false
+);
+check(
+  "וההיסטוריה אינה מחזירה את מה שנשלל",
+  tierOf(
+    pickFromHistory(
+      negRes.keptBeforeSilentDrops.map((k) => ({ product: k.product })),
+      spoonProfile,
+      { now: NOW }
+    )
+  ),
+  "אין אות"
+);
+
+// ── ולמה זה לא הופך את המנגנון לרשלני ──
+//
+// כשהלקוח קונה **גם** את המניין השני, שתי הפגיעות מבטלות זו את זו והשורה
+// חוזרת לאדם — בדיוק מה שקורה אצלו במציאות ב-"כפיות" (50 יח פי 4, 100 יח פי 2).
+check(
+  "שני מניינים שהלקוח קונה — רמז ולא הכרעה",
+  tierOf(
+    pickFromHistory(
+      spoonRes.keptBeforeSilentDrops.map((k) => ({ product: k.product })),
+      buildPurchaseProfile([
+        { sku: "1308", product: "s1", lines: 4, lastAt: monthsAgo(2) },
+        { sku: "380", product: "s2", lines: 2, lastAt: monthsAgo(2) },
+      ]),
+      { now: NOW }
+    )
+  ),
+  "hint"
+);
+
+// ───────────────────────────────────────────────────────────────
+
+section("נעילה: השליפה הקלה לא תדליף מסמך חלקי לעגלה");
+
+// ── מה נשמר כאן ──
+//
+// בשליפה רחבה נמשכים מסמכים מפורייקטדים (בלי description/image/prices), והמוביל
+// נשלף מחדש במלואו. הקוד שמעלינו מזהה "מסמך רזה" בדיוק לפי `prices === undefined`
+// (ראה resolvers), ולכן ברגע ש-prices ייכנס לפרויקציה מסמך חלקי ייראה מלא —
+// וייכנס לעגלה בלי מחיר, בלי slug ובלי תמונה. כשל שקט לחלוטין.
+const matcherSource = require("fs").readFileSync(
+  require("path").join(__dirname, "../utils/productMatching.js"),
+  "utf8"
+);
+const lightSelect = /const LIGHT_SELECT = "([^"]+)"/.exec(matcherSource)?.[1] || "";
+
+check("הפרויקציה הקלה אינה כוללת prices", lightSelect.split(" ").includes("prices"), false);
+check("אך כוללת את מה שהדירוג צריך", lightSelect.split(" ").includes("title"), true);
+check("ואת מה שהשוואת המק\"ט צריכה", lightSelect.split(" ").includes("sku"), true);
+// השליפה הרחבה נדלקת רק מעל ברירת המחדל — לקוח בלי היסטוריה אינו נוגע בה
+check(
+  "השליפה הקלה מותנית בחריגה מברירת המחדל",
+  /candidateLimit > DEFAULT_CANDIDATE_LIMIT/.test(matcherSource),
+  true
+);
+check(
+  "והמוביל נשלף מחדש במלואו",
+  /if \(lightFetch\) \{[\s\S]{0,120}Product\.findById/.test(matcherSource),
+  true
+);
+
+// ───────────────────────────────────────────────────────────────
+
 console.log(`\n${"─".repeat(50)}`);
 if (failures.length) {
   console.log(`נכשלו ${failures.length} בדיקות מתוך ${passed + failures.length}:`);

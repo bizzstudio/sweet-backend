@@ -144,6 +144,12 @@ const findStuckLine = async () => {
   const createdAliases = [];
 
   try {
+    // ── תזכורת למי שמריץ ──
+    //
+    // הבדיקה מזריקה את הפרופיל ישירות ל-resolveItems, ולכן היא מודדת את סדר
+    // הקדימויות ולא את השליפה מהמסד. השליפה הרחבה (HISTORY_CANDIDATE_LIMIT)
+    // נדלקת רק כש-historyProfile קיים — כלומר בכל הרצה כאן חוץ מ"בסיס".
+
     section("בסיס: בלי היסטוריה");
     check("השורה נשארת לא מזוהה", describe(await run(rawName)), "לא זוהה");
 
