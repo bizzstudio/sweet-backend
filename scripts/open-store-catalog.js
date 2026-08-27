@@ -35,6 +35,15 @@ const CATEGORY_ICONS = {
 const NON_SELLABLE =
   /שכירות|זיכוי|הפרש|החזרת מוצר|חשבונית|עמלה|ריבית|הנחה כללית|משלוח|דמי |ביטול|טעות/;
 
+// שורות שאינן מוצרים אך שמן אינו מכיל אף מילה חשבונאית, ולכן הביטוי למעלה
+// מפספס אותן. ההתאמה כאן היא **מדויקת ולא הכלה**, וזה מכוון: "כללי" ו-"מעמ"
+// כמחרוזות חלקיות מופיעים בעשרות מוצרים אמיתיים ("נוזל לניקוי כללי פנטסטיק",
+// "מעמד לנייר בייתי"), וסינון לפי הכלה היה מסתיר אותם.
+//
+// "כללי ללא מעמ" צף לדף הבית כמבצע של 93% הנחה (68 ₪ ← 5 ₪) — הוא המוצר
+// היחיד בקטלוג עם discount>0, ולכן היה הפריט היחיד בקרוסלת "מבצעים אחרונים".
+const NON_SELLABLE_EXACT = new Set(["כללי ללא מעמ", "שונות"]);
+
 (async () => {
   await mongoose.connect(process.env.MONGO_URI);
   const db = mongoose.connection.db;
@@ -91,7 +100,11 @@ const NON_SELLABLE =
 
   // ---- 3. מוצרים ------------------------------------------------------
   const hideFilter = {
-    $or: [{ "prices.price": { $lte: 0 } }, { "title.he": { $regex: NON_SELLABLE } }],
+    $or: [
+      { "prices.price": { $lte: 0 } },
+      { "title.he": { $regex: NON_SELLABLE } },
+      { "title.he": { $in: [...NON_SELLABLE_EXACT] } },
+    ],
   };
   const toHide = await Products.countDocuments(hideFilter);
   const toShow = await Products.countDocuments({ $nor: [hideFilter] });
