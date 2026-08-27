@@ -1229,6 +1229,10 @@ const deleteProduct = async (req, res) => {
   }
 };
 
+// ערך המיון שמקבל ברקוד שאינו מספרי. גדול מכל ברקוד EAN-13 בן 13 ספרות,
+// ולכן אינו יכול להתנגש בברקוד אמיתי.
+const BARCODE_SORT_LAST = 99999999999999;
+
 const getShowingStoreProducts = async (req, res) => {
   try {
     const queryObject = {};
@@ -1239,17 +1243,84 @@ const getShowingStoreProducts = async (req, res) => {
     // הוספת תנאי לסינון מוצרים שהם לא מוצרי חנות
     queryObject.isStoreProduct = { $ne: true };
 
-    const { category, title, slug, sku } = req.query;
+    // פרמטרים מ-req.query אינם בהכרח מחרוזות. מנתח השאילתות של Express (qs
+    // במצב extended) הופך ‎?category[$ne]=null לאובייקט ‎{ $ne: null }, וערך
+    // כפול (‎?sku=a&sku=b) למערך. אובייקט כזה זלג עד כה היישר לתוך
+    // ‎Category.findOne({ slug: category }) — כלומר אופרטור Mongo מוזרק מבחוץ
+    // ובורר קטגוריה שרירותית תוך עקיפת ההתאמה ל-slug. אימות בכניסה, במקום אחד,
+    // מנטרל את כל הווקטורים האלה לפני שהערך נוגע בשאילתה.
+    const asQueryString = (value) => (typeof value === "string" ? value.trim() : "");
+
+    const category = asQueryString(req.query.category);
+    const title = asQueryString(req.query.title);
+    const slug = asQueryString(req.query.slug);
+    const sku = asQueryString(req.query.sku);
+    const sortParam = asQueryString(req.query.sort);
 
     queryObject.status = "show";
+
+    // עימוד ומיון בצד השרת עבור דפדוף בקטגוריה.
+    //
+    // עד כאן הענף של category/title החזיר limit(100) קשיח, ולכן קטגוריה כמו
+    // "מזון" (3,590 מוצרים) הציגה בחנות 100 מוצרים בלבד — כל השאר לא היו
+    // נגישים בשום מסלול. החזרת הכל אינה פתרון: המערך המלא נשלח פעמיים בעמוד
+    // (HTML של SSR + JSON של ההידרציה) ומגיע ל-3MB+ לקטגוריה אחת.
+    //
+    // העימוד הוא opt-in: בלי page/limit בשאילתה ההתנהגות זהה לקודם, כדי שדף
+    // הבית והחיפוש שקוראים לאותו endpoint לא ישתנו.
+    //
+    // התנאי מוגבל בכוונה לענף של title/category — רק הוא יודע לעמד. בלי ההגבלה
+    // קריאה כמו ‎?slug=x&page=1 הייתה מדלגת על המיון העברי בסוף הפונקציה
+    // ומחזירה totalProducts=0 לצד רשימת מוצרים מלאה.
+    const isPaginated =
+      Boolean(title || category) &&
+      (req.query.page !== undefined || req.query.limit !== undefined);
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 100));
+    const skip = (page - 1) * limit;
+    let totalProducts = 0;
+
+    // המיון חייב לרוץ על כל הקטגוריה ולא על העמוד שהתקבל, אחרת "מהזול ליקר"
+    // ממיין 48 מוצרים אקראיים. שמות הערכים תואמים ל-SortDropdown בחנות.
+    //
+    // ‎"title.he" כשובר-שוויון בכל מיון הוא שחזור מדויק של ההתנהגות הקודמת:
+    // הרשימה הגיעה מהשרת ממוינת אלפביתית, ו-Array.prototype.sort של הדפדפן
+    // יציב — כך ששוויון במפתח הראשי השאיר את הסדר האלפביתי. בלי זה 4,289
+    // המוצרים שאין להם שדה sales היו מקבלים סדר שרירותי לפי ‎_id.
+    const sortStage = (() => {
+      switch (sortParam) {
+        case "Low":
+          return { "prices.price": 1, "title.he": 1, _id: 1 };
+        case "High":
+          return { "prices.price": -1, "title.he": 1, _id: 1 };
+        case "Alphabetical":
+          return { "title.he": 1, _id: 1 };
+        // "Popular" הוא ברירת המחדל: קודם מוצרים עם ברקוד לפי הברקוד המספרי
+        // (הברקוד משמש כאן כסדר התצוגה בחנות), ואחריהם השאר לפי מכירות.
+        default:
+          return { hasBarcode: -1, barcodeNumber: 1, sales: -1, "title.he": 1, _id: 1 };
+      }
+    })();
+
+    // רק "Popular" זקוק לשדות מחושבים (hasBarcode/barcodeNumber) ולכן רק הוא
+    // חייב aggregation. שאר המיונים רצים ב-find, שאינו מממש את כל הקטגוריה
+    // בזיכרון לפני ה-skip/limit.
+    const needsComputedSort = !["Low", "High", "Alphabetical"].includes(sortParam);
+
+    // collation עברי — נבדק מול localeCompare('he') ומחזיר סדר זהה. בלעדיו
+    // המיון הוא לפי בייטים, ואז שמות באנגלית ("HAPPY HOUR") נדחפים לפני א'.
+    const HE_COLLATION = { locale: "he" };
 
     // חיפוש לפי קטגוריה
     if (category) {
       let categoryId;
 
-      // בדיקה האם הקטגוריה היא ObjectId חוקי
+      // בדיקה האם הקטגוריה היא ObjectId חוקי.
+      // ההמרה ל-ObjectId חובה ולא קוסמטית: Product.find ממיר מחרוזת לבדו לפי
+      // הסכימה, אבל aggregate (המסלול של העימוד) אינו ממיר — ומחרוזת ב-$in
+      // פשוט לא תתאים לאף מסמך, כלומר קטגוריה ריקה בלי שגיאה.
       if (mongoose.Types.ObjectId.isValid(category) && category.length === 24) {
-        categoryId = category; // חיפוש לפי ObjectId
+        categoryId = new mongoose.Types.ObjectId(category);
       } else {
         // חיפוש לפי slug של הקטגוריה
         const foundCategory = await Category.findOne({ slug: category });
@@ -1264,6 +1335,7 @@ const getShowingStoreProducts = async (req, res) => {
             relatedProducts: [],
             discountedProducts: [],
             productsWithOffers: [],
+            totalProducts: 0,
           });
         }
       }
@@ -1312,10 +1384,66 @@ const getShowingStoreProducts = async (req, res) => {
         isStoreProduct: { $ne: true }
       }).populate({ path: "category" });
     } else if (title || category) {
-      products = await Product.find(queryObject)
-        .populate({ path: "category", select: "name _id" })
-        .sort({ _id: -1 })
-        .limit(100);
+      if (isPaginated) {
+        totalProducts = await Product.countDocuments(queryObject);
+
+        if (needsComputedSort) {
+          // barcodeNumber/hasBarcode אינם קיימים במסמך, ולכן המיון "Popular"
+          // מחייב aggregation שמחשב אותם לפני ה-sort. הברקוד נשמר כמחרוזת (וגם
+          // כמחרוזת ריקה), וההמרה עוברת דרך $convert עם onError/onNull כי ערך
+          // לא מספרי זורק. היעד הוא long ולא int בכוונה: ברקוד EAN-13 אמיתי
+          // חורג מ-int32, ו-int היה מפיל אותו ל-onError כלומר מאבד את הסדר.
+          products = await Product.aggregate([
+            { $match: queryObject },
+            {
+              $addFields: {
+                hasBarcode: {
+                  $cond: [
+                    { $in: [{ $ifNull: ["$barcode", ""] }, ["", null]] },
+                    0,
+                    1,
+                  ],
+                },
+                barcodeNumber: {
+                  $convert: {
+                    input: "$barcode",
+                    to: "long",
+                    // סנטינל גדול מכל ברקוד EAN-13 (13 ספרות) — ברקוד שאינו
+                    // מספרי נדחף לסוף קבוצת בעלי-הברקוד ולא מתנגש בערך אמיתי
+                    onError: BARCODE_SORT_LAST,
+                    onNull: BARCODE_SORT_LAST,
+                  },
+                },
+              },
+            },
+            { $sort: sortStage },
+            { $skip: skip },
+            { $limit: limit },
+            { $project: { hasBarcode: 0, barcodeNumber: 0 } },
+          ])
+            .collation(HE_COLLATION)
+            // הגנה לעתיד: $sort על קטגוריה גדולה מתבצע בזיכרון, ובלי הדגל
+            // חריגה ממגבלת 100MB מפילה את הבקשה כולה במקום לגלוש לדיסק.
+            .allowDiskUse(true);
+
+          products = await Product.populate(products, {
+            path: "category",
+            select: "name _id",
+          });
+        } else {
+          products = await Product.find(queryObject)
+            .collation(HE_COLLATION)
+            .sort(sortStage)
+            .skip(skip)
+            .limit(limit)
+            .populate({ path: "category", select: "name _id" });
+        }
+      } else {
+        products = await Product.find(queryObject)
+          .populate({ path: "category", select: "name _id" })
+          .sort({ _id: -1 })
+          .limit(100);
+      }
     } else {
       // קודם כל נביא מוצרים עם barcode
       const barcodeQuery = { ...queryObject, barcode: { $exists: true, $ne: null, $ne: "" } };
@@ -1436,8 +1564,13 @@ const getShowingStoreProducts = async (req, res) => {
     }
 
     // 'hide' מיון המוצרים לפי כותרת בעברית והסרת מוצרים שבסטטוס
-    products = products.filter(p => p.status == "show")
-      .sort((a, b) => a.title.he.localeCompare(b.title.he, 'he'));
+    //
+    // בעימוד המיון כבר נעשה ב-DB על כל הקטגוריה. מיון חוזר כאן היה מסדר מחדש
+    // רק את 48 המוצרים של העמוד הנוכחי ומבטל בפועל את בחירת המיון של הלקוח.
+    products = products.filter(p => p.status == "show");
+    if (!isPaginated) {
+      products = products.sort((a, b) => a.title.he.localeCompare(b.title.he, 'he'));
+    }
     popularProducts = popularProducts.filter(p => p.status == "show")
     // .sort((a, b) => a.title.he.localeCompare(b.title.he, 'he'));
     relatedProducts = relatedProducts.filter(p => p.status == "show")
@@ -1455,6 +1588,11 @@ const getShowingStoreProducts = async (req, res) => {
       relatedProducts,
       discountedProducts,
       productsWithOffers,
+      // נשלח תמיד; בלי עימוד הערך הוא אורך התוצאה בפועל, כדי שהצרכן לא יצטרך
+      // לדעת באיזה מצב הוא נמצא.
+      totalProducts: isPaginated ? totalProducts : products.length,
+      page: isPaginated ? page : 1,
+      limit: isPaginated ? limit : products.length,
     });
   } catch (err) {
     console.log('getShowingStoreProducts error: ', err);
