@@ -194,18 +194,41 @@ const cleanup = async () => {
   const rolled = summarizeItems(mixedLines);
 
   check("ריכוז מקבץ לשורה אחת לכל קטגוריה", rolled.length === 3, `קיבלתי ${rolled.length}`);
+  // הנוסח שהתבקש: "ריכוז תעודות משלוח" ואחריו שם הקטגוריה, בלי תוספות
   check(
-    "השורה נושאת את שם הקטגוריה",
-    rolled.some((r) => r.name === "ריכוז תעודות משלוח — מזון")
+    "השורה נושאת את שם הקטגוריה בנוסח שהתבקש",
+    rolled.some((r) => r.name === "ריכוז תעודות משלוח מזון"),
+    rolled.map((r) => r.name).join(" | ")
+  );
+  check(
+    "בקטגוריה אחידה אין הערת מע\"מ מיותרת",
+    rolled.every((r) => !r.name.includes("(")),
+    rolled.map((r) => r.name).join(" | ")
   );
   check(
     "סכום הקטגוריה נשמר",
     rolled.find((r) => r.name.includes("מזון")).lineTotal === 100
   );
+  check("שורה פטורה נשארת פטורה", rolled.some((r) => r.isVatFree));
   check(
-    "שורה פטורה נשארת פטורה ומסומנת",
-    rolled.some((r) => r.isVatFree && r.name.includes("פטור"))
+    "ושמה הוא שם הקטגוריה שלה",
+    rolled.some((r) => r.name === "ריכוז תעודות משלוח פירות" && r.isVatFree)
   );
+
+  // קטגוריה שמערבת חייב ופטור — שלוש כאלה בקטלוג. בלי הסימון היו יוצאות
+  // שתי שורות בשם זהה ובסכומים שונים, שנראות כמו כפילות.
+  const mixedVat = summarizeItems([
+    { name: "א", lineTotal: 400, categoryName: "מזון", isVatFree: false },
+    { name: "ב", lineTotal: 50, categoryName: "מזון", isVatFree: true },
+    { name: "ג", lineTotal: 300, categoryName: "פירות", isVatFree: true },
+  ]);
+  check("קטגוריה מעורבת מסומנת", mixedVat.some((r) => r.name === 'ריכוז תעודות משלוח מזון (חייב במע"מ)'));
+  check("ושתי השורות שלה נבדלות", mixedVat.some((r) => r.name === 'ריכוז תעודות משלוח מזון (פטור ממע"מ)'));
+  check(
+    "אבל קטגוריה אחידה באותה חשבונית נשארת נקייה",
+    mixedVat.some((r) => r.name === "ריכוז תעודות משלוח פירות")
+  );
+  check("ואין שתי שורות באותו שם", new Set(mixedVat.map((r) => r.name)).size === mixedVat.length);
   check(
     "הסכום הכולל לא השתנה",
     rolled.reduce((s, r) => s + r.lineTotal, 0) === 140
@@ -240,6 +263,50 @@ const cleanup = async () => {
   check(
     "והגדרת ריכוז אינה גוברת על perDelivery",
     shouldSummarize({ billing: { mode: "perDelivery", summarizeInvoiceLines: true } }) === false
+  );
+
+  // ── מוצרי הריכוז ──
+  //
+  // בחשבונית שמנוע מפיק, שורת "ריכוז תעודות משלוח" היא מוצר בקטלוג עם
+  // ברקוד משלו (3570 / 3569 / 3997). בלי זה עמודת הברקוד על החשבונית
+  // יוצאת ריקה — בדיוק העמודה שרואה החשבון מצליב מולה.
+  const { loadSummaryLines, clearCache: clearSummaryCache } = require("../lib/billing/summaryLines");
+  clearSummaryCache();
+  const summaryLines = await loadSummaryLines();
+
+  const foodLine = summaryLines.for("מזון", false);
+  const fruitLine = summaryLines.for("פירות", true);
+  const exemptLine = summaryLines.for("כללי", true);
+
+  check("קטגוריה חייבת ממופה למוצר הריכוז הכללי", foodLine?.sku === "3570", `קיבלתי ${foodLine?.sku}`);
+  check("פירות ממופים למוצר הייעודי שלהם", fruitLine?.sku === "3649", `קיבלתי ${fruitLine?.sku}`);
+  check("שורה פטורה בלי מוצר ייעודי נופלת לפטור הכללי", exemptLine?.sku === "3569");
+  check("לכל אחד מהם יש ברקוד", [foodLine, fruitLine, exemptLine].every((l) => l?.barcode));
+  check("קטגוריה שאינה במיפוי נופלת לכללי", summaryLines.for("כיבוד", false)?.sku === "3570");
+
+  const linesWithProducts = summarizeItems(mixedLines, summaryLines);
+  check("שורות הריכוז נושאות ברקוד", linesWithProducts.every((l) => l.barcode));
+  check(
+    "שורת הפירות נושאת את הברקוד הייעודי",
+    linesWithProducts.find((l) => l.name.includes("פירות"))?.barcode === fruitLine.barcode
+  );
+  check(
+    "כל השורות בנוסח שהתבקש",
+    linesWithProducts.every((l) => l.name.startsWith("ריכוז תעודות משלוח ")),
+    linesWithProducts.map((l) => l.name).join(" | ")
+  );
+  // הברקוד הוא מה שנשלח ל-iCount בשדה sku (lib/icount/documents)
+  check("הברקוד הוא זה שיישלח ל-iCount", linesWithProducts[0].barcode === foodLine.barcode);
+
+  // בלי מפענח — עדיין שורות תקינות, רק בלי ברקוד. חשבונית חייבת לצאת
+  // גם אם המיפוי לא נטען.
+  const withoutProducts = summarizeItems(mixedLines);
+  check("בלי מיפוי השורות עדיין נוצרות", withoutProducts.length === 3);
+  check("ובלי ברקוד", withoutProducts.every((l) => l.barcode === undefined));
+  check(
+    "והסכומים זהים",
+    withoutProducts.reduce((s, l) => s + l.lineTotal, 0) ===
+      linesWithProducts.reduce((s, l) => s + l.lineTotal, 0)
   );
 
   // ─────────────────────────────────────────────────────────────────

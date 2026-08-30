@@ -793,7 +793,8 @@ const loginCustomer = async (req, res) => {
     // האימייל נשמר במודל באותיות קטנות (lowercase: true), ולכן חיפוש לפי מה
     // שהוקלד כמו שהוא לא מוצא לקוח שהוקלדה לו אות גדולה או נוסף רווח בהדבקה
     const email = String(req.body.registerEmail || "").trim().toLowerCase();
-    const customer = await Customer.findOne({ email });
+    // ‎+password: השדה select:false במודל, וההשוואה כאן היא כל תכלית השאילתה
+    const customer = await Customer.findOne({ email }).select("+password");
 
     if (
       customer &&
@@ -1049,10 +1050,15 @@ const resetPassword = async (req, res) => {
 
 const changePassword = async (req, res) => {
   try {
+    // ‎+password: נדרש להשוואה מול הסיסמה הנוכחית (select:false במודל)
     // ‎+plainPassword: השדה select:false ונכתב כאן מחדש (setCustomerPassword)
     const customer = await Customer.findOne({ email: req.body.email }).select(
-      "+plainPassword"
+      "+password +plainPassword"
     );
+    // אימייל שאינו קיים הפיל כאן את הבקשה ב-TypeError והוחזר 500 במקום 404
+    if (!customer) {
+      return res.status(404).send({ message: "לקוח לא נמצא" });
+    }
     if (req?.user?.email !== customer.email) {
       return res.status(403).send({
         message: "You are not authorized to change this password!",
@@ -1188,16 +1194,37 @@ const signUpWithProvider = async (req, res) => {
   }
 };
 
+/*
+ * \u05E8\u05E9\u05D9\u05DE\u05EA \u05D4\u05DC\u05E7\u05D5\u05D7\u05D5\u05EA \u05DC\u05DE\u05E1\u05DA "\u05DC\u05E7\u05D5\u05D7\u05D5\u05EA" \u05D5\u05DC\u05D1\u05D5\u05E8\u05E8\u05D9 \u05D4\u05DC\u05E7\u05D5\u05D7\u05D5\u05EA (\u05D4\u05E6\u05E2\u05D5\u05EA \u05DE\u05D7\u05D9\u05E8, \u05EA\u05E2\u05D5\u05D3\u05D4 \u05D9\u05D3\u05E0\u05D9\u05EA,
+ * \u05E4\u05DC\u05D8\u05E4\u05D5\u05E8\u05DE\u05D5\u05EA). \u05D4\u05E8\u05E9\u05D9\u05DE\u05D4 \u05E0\u05D8\u05E2\u05E0\u05EA \u05D1\u05DE\u05DC\u05D5\u05D0\u05D4 \u05D1\u05DB\u05D5\u05D5\u05E0\u05D4 \u2014 \u05D4\u05D7\u05D9\u05E4\u05D5\u05E9 \u05D5\u05D4\u05D3\u05E4\u05D3\u05D5\u05E3 \u05E8\u05E6\u05D9\u05DD \u05D1\u05E6\u05D3 \u05D4\u05DC\u05E7\u05D5\u05D7,
+ * \u05D5\u05DB\u05DA \u05EA\u05D9\u05D1\u05EA \u05D4\u05D7\u05D9\u05E4\u05D5\u05E9 \u05DE\u05D5\u05E6\u05D0\u05EA \u05DB\u05DC \u05DC\u05E7\u05D5\u05D7 \u05D5\u05DC\u05D0 \u05E8\u05E7 \u05D0\u05EA \u05DE\u05D9 \u05E9\u05E0\u05DE\u05E6\u05D0 \u05D1\u05E2\u05DE\u05D5\u05D3 \u05D4\u05E0\u05D5\u05DB\u05D7\u05D9.
+ *
+ * \u05DE\u05D4 \u05E9\u05DB\u05DF \u05E6\u05D5\u05DE\u05E6\u05DD: \u05D4\u05E9\u05D3\u05D5\u05EA. \u05E2\u05D3 \u05DB\u05D0\u05DF \u05D7\u05D6\u05E8\u05D5 \u05DE\u05E1\u05DE\u05DB\u05D9 \u05D4\u05DC\u05E7\u05D5\u05D7 \u05D1\u05DE\u05DC\u05D5\u05D0\u05DD, \u05DB\u05D5\u05DC\u05DC \u05D4-hash \u05E9\u05DC \u05D4\u05E1\u05D9\u05E1\u05DE\u05D4
+ * (\u05D4\u05E9\u05D3\u05D4 \u05DC\u05D0 \u05D4\u05D9\u05D4 select:false), \u05E2\u05DC \u05E4\u05E0\u05D9 \u05DE\u05D0\u05D5\u05EA \u05DC\u05E7\u05D5\u05D7\u05D5\u05EA. \u05D4\u05E8\u05E9\u05D9\u05DE\u05D4 \u05DB\u05D0\u05DF \u05D4\u05D9\u05D0 \u05D1\u05D3\u05D9\u05D5\u05E7 \u05DE\u05D4
+ * \u05E9\u05D4\u05DE\u05E1\u05DB\u05D9\u05DD \u05E7\u05D5\u05E8\u05D0\u05D9\u05DD \u2014 \u05DB\u05DC \u05E9\u05D3\u05D4 \u05E0\u05D5\u05E1\u05E3 \u05E9\u05D9\u05D9\u05D3\u05E8\u05E9 \u05D1\u05E2\u05EA\u05D9\u05D3 \u05E6\u05E8\u05D9\u05DA \u05DC\u05D4\u05EA\u05D5\u05D5\u05E1\u05E3 \u05D1\u05DE\u05E4\u05D5\u05E8\u05E9.
+ */
+const CUSTOMER_LIST_FIELDS = "name lastName email phone isCashier createdAt";
+
 const getAllCustomers = async (req, res) => {
   try {
-    const users = await Customer.find({});
+    const users = await Customer.find({}).select(CUSTOMER_LIST_FIELDS).lean();
+
+    // Collator \u05D0\u05D7\u05D3 \u05DC\u05DB\u05DC \u05D4\u05DE\u05D9\u05D5\u05DF; localeCompare \u05DC\u05DB\u05DC \u05D4\u05E9\u05D5\u05D5\u05D0\u05D4 \u05D1\u05D5\u05E0\u05D4 \u05D0\u05D5\u05EA\u05D5 \u05DE\u05D7\u05D3\u05E9
+    const collator = new Intl.Collator("he");
+    // \u05DC\u05E7\u05D5\u05D7 \u05E9\u05D9\u05D5\u05D1\u05D0 \u05D1\u05DC\u05D9 \u05E9\u05DD \u05D4\u05D9\u05D4 \u05DE\u05E4\u05D9\u05DC \u05DB\u05D0\u05DF \u05D0\u05EA \u05DB\u05DC \u05D4\u05D1\u05E7\u05E9\u05D4 \u05D1-TypeError, \u05D5\u05D4\u05DE\u05E1\u05DA \u05D4\u05D9\u05D4
+    // \u05DE\u05E6\u05D9\u05D2 \u05E9\u05D2\u05D9\u05D0\u05D4 \u05D1\u05DE\u05E7\u05D5\u05DD \u05E8\u05E9\u05D9\u05DE\u05D4
+    const nameOf = (customer) =>
+      typeof customer?.name === "string" ? customer.name : "";
+
     users.sort((a, b) => {
-      const isANameHebrew = /^[\u0590-\u05FF]+$/.test(a.name);
-      const isBNameHebrew = /^[\u0590-\u05FF]+$/.test(b.name);
+      const nameA = nameOf(a);
+      const nameB = nameOf(b);
+      const isANameHebrew = /^[\u0590-\u05FF]+$/.test(nameA);
+      const isBNameHebrew = /^[\u0590-\u05FF]+$/.test(nameB);
 
       if (isANameHebrew && !isBNameHebrew) return -1;
       if (!isANameHebrew && isBNameHebrew) return 1;
-      return a.name.localeCompare(b.name);
+      return collator.compare(nameA, nameB);
     });
     res.send(users);
   } catch (err) {
@@ -1241,8 +1268,9 @@ const getCustomerById = async (req, res) => {
 // ולהיכנס איתה לחנות, ולצידה סימון האם ללקוח יש סיסמה בכלל
 const getCustomerDetails = async (req, res) => {
   try {
+    // ‎+password: נטען רק כדי לחשב את hasPassword למטה, ונמחק מיד אחר כך
     const customer = await Customer.findById(req.params.id)
-      .select("+erp +plainPassword")
+      .select("+erp +password +plainPassword")
       .lean();
 
     if (!customer) {

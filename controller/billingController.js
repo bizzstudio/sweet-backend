@@ -958,18 +958,6 @@ const getInvoiceNotes = async (req, res) => {
       return res.status(404).send({ message: `לא נמצאו תעודות לחשבונית ${docNum}` });
     }
 
-    // סיכום לפי קטגוריה — בדיוק החלוקה שמופיעה כשורות הריכוז על החשבונית
-    const byCategory = new Map();
-    for (const note of notes) {
-      for (const item of note.items || []) {
-        const key = item.categoryName || "כללי";
-        if (!byCategory.has(key)) byCategory.set(key, { category: key, total: 0, lines: 0 });
-        const bucket = byCategory.get(key);
-        bucket.total += Number(item.lineTotal) || 0;
-        bucket.lines += 1;
-      }
-    }
-
     const round = (n) => Number((Number(n) || 0).toFixed(2));
     const itemsTotal = notes.reduce(
       (sum, n) => sum + (n.items || []).reduce((s, i) => s + (Number(i.lineTotal) || 0), 0),
@@ -993,7 +981,6 @@ const getInvoiceNotes = async (req, res) => {
         issuedAt: n.issuedAt,
         billingMonth: n.billing?.billingMonth || null,
         itemCount: (n.items || []).length,
-        categories: [...new Set((n.items || []).map((i) => i.categoryName || "כללי"))],
         // סכום השורות, כלומר בדיוק מה שנכנס לחשבונית מהתעודה הזו
         netTotal: round((n.items || []).reduce((s, i) => s + (Number(i.lineTotal) || 0), 0)),
         shippingCost: round(n.shippingCost),
@@ -1002,9 +989,6 @@ const getInvoiceNotes = async (req, res) => {
         // שהלקוח מצליב מולו, ולכן הוא זה שמופיע בטבלה
         total: round(n.total),
       })),
-      categories: [...byCategory.values()]
-        .map((c) => ({ ...c, total: round(c.total) }))
-        .sort((a, b) => b.total - a.total),
       totals: {
         noteCount: notes.length,
         itemsTotal: round(itemsTotal),

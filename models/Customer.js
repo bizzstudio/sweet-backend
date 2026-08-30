@@ -203,9 +203,14 @@ const customerSchema = new mongoose.Schema(
       type: String,
       required: false,
     },
+    // ה-hash של bcrypt. select:false כדי שלא ייצא בשום תגובה רגילה: בלעדיו
+    // ‎GET /api/customer (מסך "לקוחות") היה מוריד לדפדפן את ה-hash של כל
+    // הלקוחות, ומשם הוא נכנס לקאש, ל-DevTools ולכל דיווח שגיאה שמצרף גוף תגובה.
+    // כל קוד שצריך להשוות סיסמה חייב לטעון אותו במפורש: .select("+password")
     password: {
       type: String,
       required: false,
+      select: false,
     },
     // הסיסמה כטקסט גלוי, לצד הצורה המוצפנת ב-password. נשמרת כדי שכרטיס
     // הלקוח בפאנל יוכל להציג את הסיסמה שלו ולאפשר כניסה לחנות בשמו.

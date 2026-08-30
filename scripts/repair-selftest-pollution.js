@@ -19,7 +19,9 @@ const mongoose = require("mongoose");
 const DeliveryNote = require("../models/DeliveryNote");
 
 const APPLY = process.argv.includes("--apply");
-const TEST_DOC = /^TEST-/;
+// גם QA-: סקריפטי בדיקה ידניים משתמשים בקידומת הזו, וריצה שקרסה באמצע
+// משאירה תעודות אמיתיות מסומנות כמחויבות בחשבונית שאינה קיימת
+const TEST_DOC = /^(TEST|QA)-/;
 
 (async () => {
   await mongoose.connect(process.env.MONGO_URI || process.env.MONGODB_URI);
