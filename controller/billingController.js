@@ -323,6 +323,111 @@ const cancelDeliveryNote = async (req, res) => {
 };
 
 /**
+ * עריכת תעודה שעדיין לא חויבה.
+ *
+ * זה המסלול שעונה על "הוצאתי תעודה וצריך לתקן בה משהו". תעודה שכבר
+ * חויבה נדחית כאן במפורש עם ההסבר — התיקון שלה עובר דרך זיכוי.
+ */
+const updateDeliveryNote = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה תעודה לא תקין" });
+    }
+
+    const { items, manualReference, issuedAt, notes, shippingCost, discount } = req.body || {};
+
+    if (Array.isArray(items) && items.length > MAX_ITEMS_PER_REQUEST) {
+      return res
+        .status(400)
+        .send({ message: `יותר מ-${MAX_ITEMS_PER_REQUEST} שורות בבקשה אחת` });
+    }
+    if (items !== undefined && (!Array.isArray(items) || !items.length)) {
+      return res.status(400).send({ message: "תעודת משלוח חייבת לכלול לפחות שורה אחת" });
+    }
+
+    const { note } = await deliveryNotes.update(req.params.id, {
+      items,
+      manualReference,
+      issuedAt,
+      notes,
+      shippingCost,
+      discount,
+      changedBy: adminName(req),
+    });
+
+    res.send({
+      message: `תעודה ${note.number} עודכנה ונשלחה שוב למדפסת`,
+      note: ledger.normalize(note.toObject ? note.toObject() : note),
+    });
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
+/**
+ * שכפול תעודה — "עוד אחת בדיוק כמו זו".
+ *
+ * idempotencyKey מגיע מהמסך ומונע שתי תעודות מלחיצה כפולה. בלעדיו כפתור
+ * שנלחץ פעמיים מייצר חיוב כפול על סחורה שיצאה פעם אחת.
+ */
+const duplicateDeliveryNote = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה תעודה לא תקין" });
+    }
+
+    const { note, created } = await deliveryNotes.duplicate(req.params.id, {
+      issuedBy: adminName(req),
+      idempotencyKey: req.body?.idempotencyKey,
+      issuedAt: req.body?.issuedAt,
+    });
+
+    res.status(created ? 201 : 200).send({
+      message: created
+        ? `תעודת משלוח ${note.number} נוצרה כהעתק`
+        : `העתק כבר נוצר — תעודה ${note.number}`,
+      created,
+      note: ledger.normalize(note.toObject ? note.toObject() : note),
+    });
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
+/**
+ * הפקת חשבונית מס על תעודה בודדת, עכשיו.
+ *
+ * "הפוך תעודה לחשבונית" — בלי להמתין לסגירת החודש ובלי קשר למסלול החיוב
+ * של הלקוח. אותה תפיסה אטומית כמו סגירת החודש, ולכן לחיצה כפולה או
+ * חפיפה עם סגירה שרצה במקביל לא יפיקו שתי חשבוניות.
+ */
+const billDeliveryNote = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה תעודה לא תקין" });
+    }
+
+    const note = await DeliveryNote.findById(req.params.id).select("customer number").lean();
+    if (!note) return res.status(404).send({ message: "תעודה לא נמצאה" });
+
+    const result = await monthlyBilling.billNotesNow({
+      customerId: String(note.customer),
+      noteIds: [String(note._id)],
+      emailDocument:
+        typeof req.body?.emailDocument === "boolean" ? req.body.emailDocument : undefined,
+    });
+
+    const nums = result.invoices.map((i) => i.docNum).join(", ");
+    res.send({
+      message: `חשבונית ${nums} הופקה על תעודה ${note.number}`,
+      invoices: result.invoices,
+    });
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
+/**
  * הדפסה חוזרת של תעודה.
  *
  * קיים כי ההדפסה האוטומטית יכולה להיכשל מסיבות שאין להן שום קשר למערכת —
@@ -764,7 +869,154 @@ const rejectQuote = async (req, res) => {
   }
 };
 
+/**
+ * שכפול הצעת מחיר.
+ */
+const duplicateQuote = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה הצעה לא תקין" });
+    }
+    const quote = await quotes.duplicate(req.params.id, {
+      validDays: Number(req.body?.validDays) || 30,
+      createdBy: adminName(req),
+    });
+    res.status(201).send({ message: `הצעת מחיר ${quote.number} נוצרה כהעתק`, quote });
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
+/**
+ * הפקת תעודת משלוח (או חשבונית) מהצעת מחיר, בלחיצה אחת.
+ *
+ * המקרה: הלקוח אישר את ההצעה, והסחורה יוצאת. במקום להקליד את השורות
+ * מחדש בטופס התעודה, ההצעה עצמה הופכת למסמך — עם המחירים שסוכמו בה.
+ */
+const convertQuote = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה הצעה לא תקין" });
+    }
+
+    const target = req.body?.target || "deliveryNote";
+    // idempotencyKey אינו מתקבל מהמסך בכוונה: הוא נגזר מההצעה עצמה
+    // (lib/billing/quotes.convert), כדי ששתי לחיצות נפרדות לא יוכלו
+    // להפיק שתי תעודות על אותה סחורה.
+    const result = await quotes.convert(req.params.id, {
+      target,
+      issuedBy: adminName(req),
+    });
+
+    const nums = (result.invoices || []).map((i) => i.docNum).join(", ");
+    res.status(201).send({
+      message: nums
+        ? `תעודת משלוח ${result.note.number} וחשבונית ${nums} הופקו מהצעה ${result.quote.number}`
+        : `תעודת משלוח ${result.note.number} הופקה מהצעה ${result.quote.number}`,
+      quote: result.quote,
+      note: ledger.normalize(result.note.toObject ? result.note.toObject() : result.note),
+      invoices: result.invoices || [],
+    });
+  } catch (err) {
+    // התעודה נוצרה והחשבונית נכשלה — המסך חייב לדעת ששניהם קרו, אחרת
+    // מישהו ילחץ שוב ויקבל שתי תעודות
+    res.status(400).send({
+      message: err.message,
+      note: err.note ? ledger.normalize(err.note.toObject ? err.note.toObject() : err.note) : undefined,
+    });
+  }
+};
+
 // ---------- כללי ----------
+
+/**
+ * ריכוז התעודות של חשבונית — הנספח שמצורף אליה.
+ *
+ * החשבונית עצמה נושאת שורת ריכוז לכל קטגוריה, ובראשה טבלת מספרי התעודות.
+ * המסך הזה הוא אותה טבלה בגרסה מלאה ומודפסת: מספר תעודה, תאריך, מספר
+ * הפנקס הידני, הקטגוריות שבה והסכום — מה שמאפשר ללקוח ולרואה החשבון
+ * להצליב את החשבונית מול הניירות שהתקבלו.
+ *
+ * נבנה מהתעודות ולא נשמר: "מה סגרה החשבונית" היא תמיד שאלה על התעודות,
+ * ורשומה מקבילה שנשמרת בנפרד הייתה יכולה להיפרד מהן.
+ */
+const getInvoiceNotes = async (req, res) => {
+  try {
+    const docNum = String(req.params.docnum || "").trim();
+    if (!docNum) return res.status(400).send({ message: "חסר מספר חשבונית" });
+
+    const notes = ledger.normalizeAll(
+      await DeliveryNote.find({ [ledger.f("icountDocNum")]: docNum })
+        .select(
+          "number kind orderNumber manualReference issuedAt items subTotal shippingCost discount customerDiscount discountPercent total customer customerSnapshot billing"
+        )
+        .sort({ number: 1 })
+        .lean()
+    );
+
+    if (!notes.length) {
+      return res.status(404).send({ message: `לא נמצאו תעודות לחשבונית ${docNum}` });
+    }
+
+    // סיכום לפי קטגוריה — בדיוק החלוקה שמופיעה כשורות הריכוז על החשבונית
+    const byCategory = new Map();
+    for (const note of notes) {
+      for (const item of note.items || []) {
+        const key = item.categoryName || "כללי";
+        if (!byCategory.has(key)) byCategory.set(key, { category: key, total: 0, lines: 0 });
+        const bucket = byCategory.get(key);
+        bucket.total += Number(item.lineTotal) || 0;
+        bucket.lines += 1;
+      }
+    }
+
+    const round = (n) => Number((Number(n) || 0).toFixed(2));
+    const itemsTotal = notes.reduce(
+      (sum, n) => sum + (n.items || []).reduce((s, i) => s + (Number(i.lineTotal) || 0), 0),
+      0
+    );
+    const shipping = notes.reduce((s, n) => s + (Number(n.shippingCost) || 0), 0);
+    const discount = notes.reduce((s, n) => s + (Number(n.discount) || 0), 0);
+
+    res.send({
+      docNum,
+      docUrl: notes[0].billing?.icountDocUrl || null,
+      billedAt: notes[0].billing?.billedAt || null,
+      customer: notes[0].customer,
+      customerSnapshot: notes[0].customerSnapshot || null,
+      notes: notes.map((n) => ({
+        _id: n._id,
+        number: n.number,
+        kind: n.kind || "auto",
+        orderNumber: n.orderNumber || null,
+        manualReference: n.manualReference || null,
+        issuedAt: n.issuedAt,
+        billingMonth: n.billing?.billingMonth || null,
+        itemCount: (n.items || []).length,
+        categories: [...new Set((n.items || []).map((i) => i.categoryName || "כללי"))],
+        // סכום השורות, כלומר בדיוק מה שנכנס לחשבונית מהתעודה הזו
+        netTotal: round((n.items || []).reduce((s, i) => s + (Number(i.lineTotal) || 0), 0)),
+        shippingCost: round(n.shippingCost),
+        discount: round(n.discount),
+        // הסכום שמודפס על התעודה עצמה ("סה"כ לפני מע"מ"). זה המספר
+        // שהלקוח מצליב מולו, ולכן הוא זה שמופיע בטבלה
+        total: round(n.total),
+      })),
+      categories: [...byCategory.values()]
+        .map((c) => ({ ...c, total: round(c.total) }))
+        .sort((a, b) => b.total - a.total),
+      totals: {
+        noteCount: notes.length,
+        itemsTotal: round(itemsTotal),
+        shipping: round(shipping),
+        discount: round(discount),
+        net: round(itemsTotal + shipping - discount),
+      },
+    });
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
 
 /**
  * חשבוניות של לקוח — הבסיס למסך "מה הלקוח חייב" בכרטיס הלקוח.
@@ -1079,7 +1331,11 @@ module.exports = {
   getDeliveryNoteByOrder,
   getInvoices,
   getInvoiceTotal,
+  getInvoiceNotes,
   cancelDeliveryNote,
+  updateDeliveryNote,
+  duplicateDeliveryNote,
+  billDeliveryNote,
   reprintDeliveryNote,
   getDeliveryNotePrintStatus,
   previewMonth,
@@ -1094,6 +1350,8 @@ module.exports = {
   getQuote,
   acceptQuote,
   rejectQuote,
+  duplicateQuote,
+  convertQuote,
   getCustomerOpenInvoices,
   getCustomerDocuments,
   icountMode,

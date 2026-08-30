@@ -35,6 +35,16 @@ router.post("/delivery-notes/manual", isAdmin, billingController.createManualDel
 router.get("/delivery-notes/pending-manual/:orderId", isAdmin, billingController.getPendingManualItems);
 router.get("/delivery-notes/:id", isAdmin, billingController.getDeliveryNote);
 router.patch("/delivery-notes/:id/cancel", isAdmin, billingController.cancelDeliveryNote);
+
+// עריכת תעודה שעדיין לא חויבה. תעודה שחויבה נדחית בשרת עם ההסבר —
+// התיקון שלה עובר דרך זיכוי, שמחזיר אותה למצב פתוח
+router.patch("/delivery-notes/:id", isAdmin, billingController.updateDeliveryNote);
+
+// שכפול תעודה ("עוד אחת בדיוק כמו זו")
+router.post("/delivery-notes/:id/duplicate", isAdmin, billingController.duplicateDeliveryNote);
+
+// הפיכת תעודה בודדת לחשבונית מס, בלי להמתין לסגירת החודש
+router.post("/delivery-notes/:id/bill", isAdmin, billingController.billDeliveryNote);
 // הדפסה. הדפסה חוזרת היא POST כי היא מוציאה נייר; מצב ההדפסה הוא GET.
 router.post("/delivery-notes/:id/reprint", isAdmin, billingController.reprintDeliveryNote);
 router.get("/delivery-notes/:id/print-status", isAdmin, billingController.getDeliveryNotePrintStatus);
@@ -62,6 +72,10 @@ router.get("/quotes/:id", isAdmin, billingController.getQuote);
 router.patch("/quotes/:id/accept", isAdmin, billingController.acceptQuote);
 router.patch("/quotes/:id/reject", isAdmin, billingController.rejectQuote);
 
+// שכפול הצעה, והפקת תעודת משלוח/חשבונית ממנה בלחיצה אחת
+router.post("/quotes/:id/duplicate", isAdmin, billingController.duplicateQuote);
+router.post("/quotes/:id/convert", isAdmin, billingController.convertQuote);
+
 // --- כרטיס לקוח ---
 router.get("/customer/:customerId/open-invoices", isAdmin, billingController.getCustomerOpenInvoices);
 // כל המסמכים של הלקוח במקום אחד — לכרטיס הלקוח
@@ -72,5 +86,8 @@ router.get("/customer/:customerId/documents", isAdmin, billingController.getCust
 router.get("/invoices", isAdmin, billingController.getInvoices);
 // הסכום המחייב מ-iCount, לפני רישום תשלום
 router.get("/invoices/:docnum/total", isAdmin, billingController.getInvoiceTotal);
+
+// ריכוז התעודות שהחשבונית סגרה — הנספח המודפס שמצורף אליה
+router.get("/invoices/:docnum/notes", isAdmin, billingController.getInvoiceNotes);
 
 module.exports = router;

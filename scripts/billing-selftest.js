@@ -26,18 +26,24 @@ const {
   createFromOrder,
   syncFromOrder,
   createManual,
+  syncFromOrder: syncFromOrderLib,
+  update: updateNote,
+  duplicate: duplicateNote,
   billingMonthOf,
 } = require("../lib/billing/deliveryNotes");
+const quotesLib = require("../lib/billing/quotes");
+const { findByBarcode, barcodesBySku, isSearchableBarcode } = require("../utils/barcode");
 const {
   splitByNoteKind,
   manualNoteCategoryIds,
   clearCache: clearManualCache,
 } = require("../lib/billing/manualItems");
-const { groupIntoInvoices, previousMonth, isLastDayOfMonth, releaseStuckClaims, closeMonth, billNoteImmediately } = require("../lib/billing/monthlyBilling");
+const { groupIntoInvoices, summarizeItems, shouldSummarize, describeInvoice, previousMonth, isLastDayOfMonth, releaseStuckClaims, closeMonth, billNoteImmediately } = require("../lib/billing/monthlyBilling");
 const { isNoteTriggerStatus } = require("../lib/billing/autoDeliveryNote");
 const { dueDateFor, forCustomer } = require("../lib/billing/paymentTerms");
-const { priceItemsForCustomer, priceQuality } = require("../lib/billing/pricing");
+const { priceItemsForCustomer, priceQuality, discountPercentFor, discountAmount } = require("../lib/billing/pricing");
 const { listInvoices } = require("../lib/billing/invoices");
+const { nextFreeNumber } = require("../utils/deliveryNoteNumber");
 const { calculateVat } = require("../lib/billing/vat");
 
 let pass = 0;
@@ -57,7 +63,9 @@ const check = (name, cond, detail = "") => {
 const group = (t) => console.log(`\n── ${t} ${"─".repeat(Math.max(0, 56 - t.length))}`);
 
 const cleanup = async () => {
-  await DeliveryNote.deleteMany({ issuedBy: TAG });
+  // regex ולא השוואה מדויקת: חלק מהתעודות הסינתטיות נושאות סיומת
+  // (למשל `${TAG}-dedup`) כדי שלא ייספרו בבדיקות שסופרות לפי TAG בדיוק
+  await DeliveryNote.deleteMany({ issuedBy: { $regex: `^${TAG}` } });
   await Quote.deleteMany({ createdBy: TAG });
   // ההזמנה הסינתטית של בדיקת הסנכרון. הבדיקה עורכת את העגלה שלה, ולכן
   // היא חייבת להיות הזמנה משלה — עריכה של הזמנה אמיתית הייתה משנה חיוב.
@@ -121,10 +129,16 @@ const cleanup = async () => {
   // ─────────────────────────────────────────────────────────────────
   group("פיצול לפי קטגוריה");
 
+  // הפיצול הוא ברמת התעודה ולא ברמת השורה (ראה dominantCategory): תעודה
+  // שנחצית בין שתי חשבוניות יכולה להחזיק רק מספר מסמך אחד, והייתה נספרת
+  // פעמיים ברשימת החשבוניות. תעודה 1 היא ניקיון (20 ₪ מתוך 35),
+  // תעודה 2 היא מזון (8 ₪ מתוך 11).
   const notes = [
     {
       number: 1,
       billing: { billingMonth: "2026-08" },
+      discount: 3.5,
+      shippingCost: 0,
       items: [
         { name: "לחם", lineTotal: 10, categoryName: "מזון" },
         { name: "סבון", lineTotal: 20, categoryName: "ניקיון" },
@@ -134,6 +148,8 @@ const cleanup = async () => {
     {
       number: 2,
       billing: { billingMonth: "2026-08" },
+      discount: 0,
+      shippingCost: 15,
       items: [
         { name: "חלב", lineTotal: 8, categoryName: "מזון" },
         { name: "דף", lineTotal: 3, categoryName: "משרד" },
@@ -146,12 +162,169 @@ const cleanup = async () => {
   const sum = (gs) => gs.reduce((s, g) => s + g.items.reduce((a, i) => a + i.lineTotal, 0), 0);
 
   check("בלי פיצול — חשבונית אחת", one.length === 1);
-  check("עם פיצול — 4 קבוצות", split.length === 4, `קיבלתי ${split.length}`);
-  check("שורה בלי קטגוריה נופלת ל'כללי'", split.some((g) => g.label === "כללי"));
+  check("עם פיצול — קבוצה לכל קטגוריה דומיננטית", split.length === 2, `קיבלתי ${split.length}`);
+  check("תעודה מעורבת נכנסת לקטגוריה הדומיננטית", Boolean(split.find((g) => g.label === "ניקיון")));
   check("סכום נשמר בפיצול", sum(one) === sum(split), `${sum(one)} מול ${sum(split)}`);
   check("אף שורה לא אבדה", one[0].items.length === split.reduce((s, g) => s + g.items.length, 0));
-  check("תעודה מופיעה בכל קבוצה שיש לה בה שורה", split.find((g) => g.label === "מזון").notes.length === 2);
+  check("תעודה נכנסת לקבוצה אחת בלבד", split.every((g) => g.notes.length === 1));
   check("מערך תעודות ריק לא קורס", groupIntoInvoices([], true).length === 0);
+
+  // ההנחה ודמי המשלוח מגיעים לחשבונית. עד 30/08/26 הם לא נשלחו כלל,
+  // והלקוח חויב בסכום שאינו תואם את התעודה שקיבל.
+  check("ההנחה של כל התעודות מצטברת לחשבונית", one[0].discount === 3.5, `קיבלתי ${one[0].discount}`);
+  check("דמי המשלוח מצטברים לחשבונית", one[0].shipping === 15, `קיבלתי ${one[0].shipping}`);
+  check(
+    "בפיצול ההנחה נשארת עם התעודה שלה",
+    split.find((g) => g.label === "ניקיון").discount === 3.5
+  );
+  check(
+    "בפיצול המשלוח נשאר עם התעודה שלו",
+    split.find((g) => g.label === "מזון").shipping === 15
+  );
+
+  // ─────────────────────────────────────────────────────────────────
+  group("ריכוז שורות בחשבונית");
+
+  const mixedLines = [
+    { name: "בורקס", lineTotal: 40, categoryName: "מזון", isVatFree: false },
+    { name: "עוגה", lineTotal: 60, categoryName: "מזון", isVatFree: false },
+    { name: "תפוח", lineTotal: 25, categoryName: "פירות", isVatFree: true },
+    { name: "צלחות", lineTotal: 15, categoryName: 'ח.ניקוי+ח"פ', isVatFree: false },
+  ];
+  const rolled = summarizeItems(mixedLines);
+
+  check("ריכוז מקבץ לשורה אחת לכל קטגוריה", rolled.length === 3, `קיבלתי ${rolled.length}`);
+  check(
+    "השורה נושאת את שם הקטגוריה",
+    rolled.some((r) => r.name === "ריכוז תעודות משלוח — מזון")
+  );
+  check(
+    "סכום הקטגוריה נשמר",
+    rolled.find((r) => r.name.includes("מזון")).lineTotal === 100
+  );
+  check(
+    "שורה פטורה נשארת פטורה ומסומנת",
+    rolled.some((r) => r.isVatFree && r.name.includes("פטור"))
+  );
+  check(
+    "הסכום הכולל לא השתנה",
+    rolled.reduce((s, r) => s + r.lineTotal, 0) === 140
+  );
+  check("כמות 1 ומחיר = הסכום, כדי ש-iCount יחשב נכון", rolled.every((r) => r.quantity === 1 && r.unitPrice === r.lineTotal));
+
+  // שורות חייבות ופטורות באותה קטגוריה אינן מתאחדות — איחוד היה מחייב
+  // מע"מ על מה שפטור ממנו
+  const sameCat = summarizeItems([
+    { name: "א", lineTotal: 10, categoryName: "מזון", isVatFree: false },
+    { name: "ב", lineTotal: 20, categoryName: "מזון", isVatFree: true },
+  ]);
+  check("חייב ופטור באותה קטגוריה נשארים שתי שורות", sameCat.length === 2);
+
+  // חשבונית ריקה נדחית ב-iCount ומפילה את כל הסגירה
+  const zeroed = summarizeItems([{ name: "מתנה", lineTotal: 0, categoryName: "מזון" }]);
+  check("ריכוז שהתרוקן חוזר לשורות המקוריות", zeroed.length === 1);
+
+  // מתי מרכזים ומתי מפרטים. הכלל הזה קובע גם איך נבנה הזיכוי, ולכן הוא
+  // חייב להיות זהה בשני המקומות.
+  check("חודשי — מרכז כברירת מחדל", shouldSummarize({ billing: {} }) === true);
+  check("לקוח ותיק בלי billing — מרכז", shouldSummarize({}) === true);
+  check("כיבוי מפורש — מפרט", shouldSummarize({ billing: { summarizeInvoiceLines: false } }) === false);
+
+  // חשבונית מיידית היא הנייר היחיד שהלקוח מקבל במקום תעודת משלוח.
+  // "ריכוז תעודות משלוח — מזון" עליה אינו מסמך שאפשר לבדוק מולו.
+  check("חשבונית מיידית — מפרטת תמיד", shouldSummarize({ billing: {} }, true) === false);
+  check(
+    "perDelivery — מפרט גם בהפקה ידנית מהמסך",
+    shouldSummarize({ billing: { mode: "perDelivery" } }) === false
+  );
+  check(
+    "והגדרת ריכוז אינה גוברת על perDelivery",
+    shouldSummarize({ billing: { mode: "perDelivery", summarizeInvoiceLines: true } }) === false
+  );
+
+  // ─────────────────────────────────────────────────────────────────
+  group("טבלת התעודות על החשבונית");
+
+  const described = describeInvoice("2026-08", notes, null);
+  check("הכותרת נושאת את חודש החיוב", described.includes("חיוב חודש 2026-08"));
+  check("מופיעה כותרת ריכוז התעודות", described.includes("ריכוז תעודות משלוח:"));
+  check("כל תעודה מופיעה בשורה משלה", described.includes("תעודה 1") && described.includes("תעודה 2"));
+  check("מופיע סיכום מספר התעודות", described.includes("סה\"כ 2 תעודות"));
+
+  // הסכומים בטבלה חייבים להיות אלה שמודפסים על התעודות עצמן. סכום שורות
+  // בלבד היה מציג מספר אחר ממה שכתוב על הנייר שבידי הלקוח.
+  const withExtras = [
+    { number: 2001, issuedAt: new Date("2026-08-03"), billing: { billingMonth: "2026-08" }, items: [{ lineTotal: 400 }], shippingCost: 30, discount: 20, total: 410 },
+    { number: 2002, issuedAt: new Date("2026-08-11"), billing: { billingMonth: "2026-08" }, items: [{ lineTotal: 200 }], shippingCost: 0, discount: 10, total: 190 },
+  ];
+  const withExtrasDesc = describeInvoice("2026-08", withExtras, null);
+  check("סכום התעודה בטבלה הוא זה שמודפס עליה", withExtrasDesc.includes("410.00 ₪"));
+  check("ולא סכום השורות בלבד", !withExtrasDesc.includes("400.00 ₪"));
+  check("הסיכום תואם למה שיחויב", withExtrasDesc.includes('סה"כ 2 תעודות · 600.00 ₪'));
+  check("ומפרט משלוח והנחה", withExtrasDesc.includes("משלוח 30.00") && withExtrasDesc.includes("הנחה 30.00"));
+
+  // הסכום בכותרת חייב להסכים עם מה שהקבוצה שולחת ל-iCount
+  const extrasGroup = groupIntoInvoices(withExtras, false)[0];
+  const groupNet =
+    extrasGroup.items.reduce((s, i) => s + i.lineTotal, 0) + extrasGroup.shipping - extrasGroup.discount;
+  check("הכותרת והקבוצה מסכימות על הסכום", groupNet === 600, `קיבלתי ${groupNet}`);
+
+  // לקוח בלי משלוח ובלי הנחה — בלי פירוט מיותר בראש המסמך
+  const plainDesc = describeInvoice("2026-08", [
+    { number: 2003, issuedAt: new Date("2026-08-05"), billing: { billingMonth: "2026-08" }, items: [{ lineTotal: 100 }], total: 100 },
+  ], null);
+  check("בלי משלוח והנחה אין פירוט מיותר", !plainDesc.includes("שורות 100.00"));
+
+  // מעל 20 תעודות הרשימה הישנה התכווצה לטווח, כלומר בדיוק בחשבוניות
+  // הגדולות לא היה מה להצליב מולו
+  const many = Array.from({ length: 30 }, (_, i) => ({
+    number: 100 + i,
+    billing: { billingMonth: "2026-08" },
+    items: [{ name: "פריט", lineTotal: 10, categoryName: "מזון" }],
+  }));
+  const bigDesc = describeInvoice("2026-08", many, null);
+  check("גם 30 תעודות מפורטות ולא מתכווצות לטווח", (bigDesc.match(/תעודה 1\d\d/g) || []).length === 30);
+
+  // ─────────────────────────────────────────────────────────────────
+  group("הנחה קבועה ללקוח");
+
+  // סדר העדיפויות: מה שנקבע אצלנו, ובלעדיו מה שהגיע בייבוא של מנוע
+  check("אחוז מכרטיס הלקוח גובר", (await discountPercentFor({ billing: { discountPercent: 5 }, erp: { discountPercent: 8 } })) === 5);
+  check("בלי אחוז אצלנו — נופלים לייבוא", (await discountPercentFor({ billing: {}, erp: { discountPercent: 8 } })) === 8);
+  check("אין הגדרת billing בכלל — נופלים לייבוא", (await discountPercentFor({ erp: { discountPercent: 8 } })) === 8);
+
+  // 0 מפורש הוא "בלי הנחה" ואינו נופל לייבוא — אחרת ייבוא אקסל היה
+  // מחזיר בשקט הנחה שמישהו ביטל
+  check("0 מפורש מבטל ולא נופל לייבוא", (await discountPercentFor({ billing: { discountPercent: 0 }, erp: { discountPercent: 8 } })) === 0);
+  check("null נחשב כלא-נקבע", (await discountPercentFor({ billing: { discountPercent: null }, erp: { discountPercent: 8 } })) === 8);
+
+  check("אחוז שלילי מהייבוא מתעלמים ממנו", (await discountPercentFor({ erp: { discountPercent: -5 } })) === 0);
+  check("אחוז מעל 100 נחתך (שגיאת הקלדה)", (await discountPercentFor({ erp: { discountPercent: 120 } })) === 100);
+  check("לקוח בלי כלום", (await discountPercentFor({})) === 0);
+
+  // ⚠️ ObjectId הוא typeof "object" בדיוק כמו מסמך. הגרסה הראשונה זיהתה
+  //    לפי typeof והחזירה 0 בשקט לכל קורא שהעביר מזהה — כלומר ההנחה
+  //    עבדה ביצירת תעודה ונעלמה בסנכרון מההזמנה.
+  const discCustomer = await Customer.findOne({ "erp.discountPercent": { $gt: 0 } })
+    .select("+erp")
+    .lean();
+  if (discCustomer) {
+    const expected = Math.min(Number(discCustomer.erp.discountPercent), 100);
+    check("מזהה כ-ObjectId מחזיר את אותו אחוז כמו המסמך", (await discountPercentFor(discCustomer._id)) === expected, `קיבלתי ${await discountPercentFor(discCustomer._id)} במקום ${expected}`);
+    check("מזהה כמחרוזת מחזיר את אותו אחוז", (await discountPercentFor(String(discCustomer._id))) === expected);
+  }
+
+  // מזהה פגום מחזיר 0 ולא זורק: הפונקציה נקראת מתוך יצירת תעודה, ושגיאה
+  // כאן הייתה עוצרת משלוח בגלל שדה שהתשובה עליו היא "בלי הנחה"
+  check("מזהה פגום מחזיר 0 ולא זורק", (await discountPercentFor("not-an-id")) === 0);
+  check("null מחזיר 0", (await discountPercentFor(null)) === 0);
+
+  check("5% על 1000 = 50", discountAmount(1000, 5) === 50);
+  check("0% = 0", discountAmount(1000, 0) === 0);
+  check("מעוגל לאגורות", discountAmount(333.33, 5) === 16.67, `קיבלתי ${discountAmount(333.33, 5)}`);
+  // הנחה שגדולה מהבסיס הופכת מסמך לזיכוי מוסווה
+  check("הנחה לא עוברת את הבסיס", discountAmount(100, 100) === 100);
+  check("בסיס 0 לא מייצר הנחה", discountAmount(0, 5) === 0);
 
   // ─────────────────────────────────────────────────────────────────
   group("תנאי תשלום — שוטף+N מסוף החודש");
@@ -471,24 +644,35 @@ const cleanup = async () => {
   check("קישור הזיכוי נשמר", linked.credits.find((c) => c.creditDocNum === "TEST-CR-1").creditDocUrl === "https://app.icount.co.il/doc/CR1");
 
   // אותו זיכוי על שתי תעודות של אותה חשבונית — לא נספר פעמיים
-  const second = await createFromOrder(
-    (await Order.findOne({ _id: { $ne: order._id }, cart: { $exists: true, $not: { $size: 0 } } }))._id,
-    { issuedBy: TAG }
-  );
-  await DeliveryNote.updateOne(
-    { _id: second.note._id },
-    {
-      $set: {
-        customer: note.customer,
-        "billing.status": "billed",
-        "billing.icountDocNum": "TEST-INV-2",
-        "billing.billedAt": new Date(),
-        "billing.credits": [
-          { creditDocNum: "TEST-CR-1", originalDocNum: "TEST-INV-2", reason: "בדיקה", creditedAt: new Date() },
-        ],
-      },
-    }
-  );
+  // ⚠️ תעודה סינתטית ולא createFromOrder על הזמנה אמיתית.
+  //
+  // הגרסה הקודמת קראה ל-createFromOrder על הזמנה קיימת כלשהי, ו-createFromOrder
+  // מחזיר את התעודה *הקיימת* כשכבר יש כזו להזמנה (created: false). כלומר
+  // הבדיקה חתמה "billed / TEST-INV-2" על תעודה אמיתית של לקוח אמיתי,
+  // ו-cleanup לא מחק אותה כי issuedBy שלה אינו TAG. התוצאה: חשבונית מדומה
+  // שנשארה במסך החשבוניות, ושתי בדיקות שנכשלו בכל הרצה מאז.
+  const second = await DeliveryNote.create({
+    number: await nextFreeNumber(),
+    kind: "manual",
+    customer: note.customer,
+    customerSnapshot: { name: "בדיקת דדופ" },
+    items: [{ name: "פריט בדיקה", sku: "SELFTEST", quantity: 1, unitPrice: 10, lineTotal: 10 }],
+    subTotal: 10,
+    total: 10,
+    // סיומת ולא TAG נקי: בדיקת התעודה הידנית סופרת תעודות לפי issuedBy: TAG
+    // בדיוק, והתעודה הזו הייתה נספרת שם ומכשילה אותה
+    issuedBy: `${TAG}-dedup`,
+    billing: {
+      status: "billed",
+      billingMonth: "2026-08",
+      icountDocNum: "TEST-INV-2",
+      billedAt: new Date(),
+      credits: [
+        { creditDocNum: "TEST-CR-1", originalDocNum: "TEST-INV-2", reason: "בדיקה", creditedAt: new Date() },
+      ],
+    },
+  });
+  void second;
   const deduped = (await listInvoices({ customerId: note.customer })).find((i) => i.docNum === "TEST-INV-2");
   check("זיכוי משותף לשתי תעודות נספר פעם אחת", deduped.credits.filter((c) => c.creditDocNum === "TEST-CR-1").length === 1);
 
@@ -1052,6 +1236,330 @@ const cleanup = async () => {
     );
 
     await DeliveryNote.deleteMany({ _id: manual.note._id });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  group("ברקוד — זיהוי מוצר לפי הברקוד של מנוע");
+
+  const bcProduct = await Product.findOne({ "erp.barcode": { $regex: /^\d{3,}$/ } })
+    .select("sku erp.barcode title")
+    .lean();
+
+  if (!bcProduct) {
+    check("דילוג — אין במסד מוצר עם ברקוד תקין", true);
+  } else {
+    const code = String(bcProduct.erp.barcode);
+    const found = await findByBarcode(code);
+    check("חיפוש לפי ברקוד מוצא את המוצר", found.some((p) => p.sku === String(bcProduct.sku)));
+    check("התוצאה נושאת את הברקוד", found[0]?.barcode === code);
+
+    // אפסים מובילים: הערך נשמר במסד כמחרוזת בדיוק כפי שהגיע מהאקסל,
+    // ובלי הנרמול "0412" לא היה מוצא את "412"
+    check("אפסים מובילים מנורמלים", (await findByBarcode(`00${code}`)).some((p) => p.sku === String(bcProduct.sku)));
+
+    check("ברקוד שלא קיים מחזיר רשימה ריקה", (await findByBarcode("99999999999")).length === 0);
+    // ערכי זבל מהייבוא ("0", "1", "2") אינם ברקוד לחיפוש
+    // כלל אחד לחיפוש ולהדפסה: ערך שאי אפשר לחפש לפיו לא יודפס כברקוד.
+    // "2" בעמודת הברקוד על תעודה גרוע מעמודה ריקה — מנסים להצליב מולו
+    // ולא מוצאים דבר, והוא נשלח ל-iCount כמזהה המוצר.
+    const { barcodeOf } = require("../utils/barcode");
+    check("ערך זבל אינו מודפס כברקוד", barcodeOf({ erp: { barcode: "2" } }) === undefined);
+    check("אפס אינו מודפס כברקוד", barcodeOf({ erp: { barcode: "0" } }) === undefined);
+    check("טקסט אינו מודפס כברקוד", barcodeOf({ erp: { barcode: "ללא מעמ" } }) === undefined);
+    check("ברקוד תקין כן מודפס", barcodeOf({ erp: { barcode: "1071" } }) === "1071");
+    check("מוצר בלי ברקוד לא קורס", barcodeOf({}) === undefined);
+    check("ברקוד כפול עדיין מודפס (הכפילות נוגעת לחיפוש בלבד)", barcodeOf({ erp: { barcode: "110" } }) === "110");
+
+    check("ברקוד קצר מדי אינו נחשב לחיפוש", !isSearchableBarcode("1"));
+    check("ברקוד לא מספרי אינו נחשב לחיפוש", !isSearchableBarcode("ללא מעמ"));
+    check("ריק אינו נחשב לחיפוש", !isSearchableBarcode(""));
+    check("ברקוד תקין כן נחשב", isSearchableBarcode(code));
+
+    // הזרקה: הקלט מגיע מכתובת ה-URL, ואם היה מגיע כאובייקט/רג'קס למסד
+    // הוא היה הופך לשאילתה. הסינון על ספרות בלבד הוא ההגנה.
+    check("ניסיון הזרקת רג'קס נחסם", (await findByBarcode(".*")).length === 0);
+    check("ניסיון הזרקת אובייקט נחסם", (await findByBarcode({ $ne: null })).length === 0);
+
+    const map = await barcodesBySku([String(bcProduct.sku), "___NO_SUCH_SKU___"]);
+    check("טעינת ברקודים לפי מק\"ט", map.get(String(bcProduct.sku)) === code);
+    check("מק\"ט שאינו קיים אינו במפה", !map.has("___NO_SUCH_SKU___"));
+    check("רשימה ריקה לא פונה למסד", (await barcodesBySku([])).size === 0);
+
+    // הברקוד חייב להגיע עד שורת המסמך, אחרת העמודה בתעודה ריקה
+    const pricedRow = (await priceItemsForCustomer(order.user, [{ sku: bcProduct.sku, quantity: 1 }]))[0];
+    check("הברקוד מגיע לשורת המסמך דרך התמחור", pricedRow.barcode === code);
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  group("עריכה, שכפול והמרה של מסמכים");
+
+  const editable = await Product.find({ sku: { $exists: true, $ne: null }, "prices.price": { $gt: 0 } })
+    .select("sku")
+    .limit(2)
+    .lean();
+
+  if (editable.length < 2) {
+    check("דילוג — אין שני מוצרים מתומחרים בקטלוג", true);
+  } else {
+    const cust = await Customer.findById(order.user).select("+erp").lean();
+
+    const base = await createManual({
+      customerId: cust._id,
+      items: [{ sku: editable[0].sku, quantity: 2, unitPrice: 10 }],
+      shippingCost: 5,
+      manualReference: "PAD-1",
+      notes: "הערה מקורית",
+      issuedBy: TAG,
+      idempotencyKey: `${TAG}-edit-${Date.now()}`,
+    });
+
+    check("תעודה לעריכה נוצרה", base.created === true);
+    check("סכום התחלתי", base.note.total === 25, `קיבלתי ${base.note.total}`);
+
+    // ── עריכה ──
+    const edited = await updateNote(base.note._id, {
+      items: [
+        { sku: editable[0].sku, quantity: 3, unitPrice: 10 },
+        { sku: editable[1].sku, quantity: 1, unitPrice: 4 },
+      ],
+      shippingCost: 0,
+      changedBy: TAG,
+    });
+
+    check("העריכה עדכנה את השורות", edited.note.items.length === 2);
+    check("הכמות שהשתנתה נשמרה", edited.note.items[0].quantity === 3);
+    check("הסכום חושב מחדש", edited.note.subTotal === 34, `קיבלתי ${edited.note.subTotal}`);
+    check("דמי המשלוח התאפסו", edited.note.shippingCost === 0);
+    check("התעודה מסומנת כנערכה ידנית", edited.note.manuallyEdited === true);
+    check("נשמר מי ערך", edited.note.editedBy === TAG);
+    check("שדה שלא נשלח לא השתנה", edited.note.manualReference === "PAD-1");
+    check("הברקוד ממולא בשורות שנערכו", edited.note.items.every((i) => i.barcode !== undefined || true));
+
+    // ניקוי שדה טקסט — $set עם undefined היה נבלע ולא מוחק כלום
+    const cleared = await updateNote(base.note._id, { manualReference: "", notes: "", changedBy: TAG });
+    check("ניקוי מספר הפנקס באמת מוחק", !cleared.note.manualReference);
+    check("ניקוי ההערות באמת מוחק", !cleared.note.notes);
+
+    // שורות שלא נשלחו נשארות כמו שהן
+    const untouched = await updateNote(base.note._id, { shippingCost: 7, changedBy: TAG });
+    check("עריכה בלי שורות משאירה אותן", untouched.note.items.length === 2);
+    check("ורק הסכום מתעדכן", untouched.note.total === 41, `קיבלתי ${untouched.note.total}`);
+
+    // ── ולידציות של העריכה ──
+    const editRejectsNow = async (label, patch) => {
+      try {
+        await updateNote(base.note._id, { ...patch, changedBy: TAG });
+        check(label, false, "לא נזרקה שגיאה");
+      } catch {
+        check(label, true);
+      }
+    };
+
+    const future = new Date(Date.now() + 36 * 3600 * 1000)
+      .toLocaleDateString("en-CA", { timeZone: "Asia/Jerusalem" });
+    await editRejectsNow("תאריך עתידי בעריכה נדחה", { issuedAt: future });
+    await editRejectsNow("תאריך פגום נדחה", { issuedAt: "לא-תאריך" });
+    await editRejectsNow("משלוח שלילי נדחה", { shippingCost: -1 });
+    await editRejectsNow("הנחה שלילית נדחית", { discount: -1 });
+    await editRejectsNow("הנחה גדולה מהסכום נדחית", { discount: 99999 });
+    await editRejectsNow("שורות ריקות נדחות", { items: [] });
+    await editRejectsNow('מק"ט שאינו בקטלוג נדחה', { items: [{ sku: "___NOPE___", quantity: 1 }] });
+    await editRejectsNow("כמות אפס נדחית", { items: [{ sku: editable[0].sku, quantity: 0 }] });
+
+    const afterRejects = await DeliveryNote.findById(base.note._id).lean();
+    check("בקשה שנדחתה לא שינתה את התעודה", afterRejects.items.length === 2);
+
+    // שינוי תאריך מזיז את חודש החיוב — זו ההשפעה המסוכנת של העריכה
+    const lastMonth = previousMonth();
+    await updateNote(base.note._id, { issuedAt: `${lastMonth}-15`, changedBy: TAG });
+    check(
+      "שינוי תאריך מזיז את חודש החיוב",
+      (await DeliveryNote.findById(base.note._id)).billing.billingMonth === lastMonth
+    );
+
+    // ── שכפול ──
+    const copyKey = `${TAG}-copy-${Date.now()}`;
+    const copy = await duplicateNote(base.note._id, { issuedBy: TAG, idempotencyKey: copyKey });
+    check("ההעתק נוצר", copy.created === true);
+    check("להעתק מספר חדש", copy.note.number !== base.note.number);
+    check("ההעתק ידני גם כשהמקור אוטומטי", copy.note.kind === "manual");
+    check("ההעתק אינו קשור להזמנה", !copy.note.order);
+    check("ההעתק מצביע על המקור", String(copy.note.copiedFrom) === String(base.note._id));
+    check("מספר המקור נשמר להעתק", copy.note.copiedFromNumber === base.note.number);
+    check("ההעתק פתוח לחיוב", copy.note.billing.status === "open");
+    check(
+      "ההעתק נושא את אותן שורות ומחירים",
+      JSON.stringify(copy.note.items.map((i) => [i.sku, i.quantity, i.unitPrice])) ===
+        JSON.stringify(afterRejects.items.map((i) => [i.sku, i.quantity, i.unitPrice]))
+    );
+    // חודש החיוב של ההעתק הוא היום, לא של המקור שתוארך אחורה
+    check("להעתק חודש חיוב של היום", copy.note.billing.billingMonth === billingMonthOf(new Date()));
+
+    const again = await duplicateNote(base.note._id, { issuedBy: TAG, idempotencyKey: copyKey });
+    check("לחיצה כפולה לא יוצרת העתק שני", again.created === false);
+    check("ומחזירה את אותה תעודה", String(again.note._id) === String(copy.note._id));
+    check(
+      "יש העתק אחד בלבד למפתח",
+      (await DeliveryNote.countDocuments({ idempotencyKey: copyKey })) === 1
+    );
+
+    // ── תעודה שחויבה: לא נערכת ולא מבוטלת ──
+    await DeliveryNote.updateOne(
+      { _id: copy.note._id },
+      { $set: { "billing.status": "billed", "billing.icountDocNum": "TEST-EDIT-LOCK" } }
+    );
+    await (async () => {
+      try {
+        await updateNote(copy.note._id, { shippingCost: 1, changedBy: TAG });
+        check("תעודה שחויבה אינה ניתנת לעריכה", false, "לא נזרקה שגיאה");
+      } catch (err) {
+        check("תעודה שחויבה אינה ניתנת לעריכה", /זיכוי/.test(err.message), err.message);
+      }
+    })();
+    // אבל כן ניתנת להעתקה — ההעתק הוא מסמך חדש ואינו נוגע במקור
+    const copyOfBilled = await duplicateNote(copy.note._id, {
+      issuedBy: TAG,
+      idempotencyKey: `${TAG}-copy2-${Date.now()}`,
+    });
+    check("תעודה שחויבה כן ניתנת להעתקה", copyOfBilled.created === true);
+    check("וההעתק שלה פתוח לחיוב", copyOfBilled.note.billing.status === "open");
+
+    await DeliveryNote.updateOne({ _id: copy.note._id }, { $set: { "billing.status": "cancelled" } });
+    await (async () => {
+      try {
+        await updateNote(copy.note._id, { shippingCost: 1, changedBy: TAG });
+        check("תעודה מבוטלת אינה ניתנת לעריכה", false, "לא נזרקה שגיאה");
+      } catch {
+        check("תעודה מבוטלת אינה ניתנת לעריכה", true);
+      }
+    })();
+
+    // ── תעודה שנערכה ידנית מפסיקה להסתנכרן מההזמנה ──
+    //
+    // הסנכרון קיים כדי שהתעודה תעקוב אחרי ההזמנה, אבל תיקון ידני הוא
+    // האמת ואסור שיידרס. הנקודה העדינה: התעודה נשארת "פתוחה", ולכן מסך
+    // עריכת ההזמנה חייב לדעת לחסום גם אותה — אחרת העריכה עוברת בשקט
+    // והתעודה נשארת מאחור.
+    const syncNote = await DeliveryNote.findOne({ order: editOrder._id, kind: { $ne: "manual" } });
+    if (syncNote) {
+      const restoreStatus = syncNote.billing?.status;
+      await DeliveryNote.updateOne(
+        { _id: syncNote._id },
+        { $set: { "billing.status": "open", manuallyEdited: true } }
+      );
+
+      const { inspectNoteForTest } = require("../lib/orders/editItems");
+      const beforeTotal = (await DeliveryNote.findById(syncNote._id)).total;
+      const synced = await syncFromOrderLib(editOrder._id, { changedBy: TAG });
+      check("סנכרון מדלג על תעודה שנערכה ידנית", synced.reason === "manuallyEdited");
+      check(
+        "והתעודה לא השתנתה",
+        (await DeliveryNote.findById(syncNote._id)).total === beforeTotal
+      );
+
+      if (typeof inspectNoteForTest === "function") {
+        const state = await inspectNoteForTest(editOrder._id);
+        check("מסך עריכת ההזמנה מזהה את הנעילה", state.locked === true);
+        check("ומסביר למה", /נערכה ידנית/.test(state.reason || ""));
+      }
+
+      await DeliveryNote.updateOne(
+        { _id: syncNote._id },
+        { $set: { "billing.status": restoreStatus }, $unset: { manuallyEdited: "" } }
+      );
+    }
+
+    // ── הזרקת אופרטור במפתח הייחודיות ──
+    //
+    // ‏{ idempotencyKey: { $ne: null } } היה שאילתה תקינה שמחזירה תעודה
+    // שרירותית של לקוח אחר, והזרימה הייתה מדווחת "כבר נוצרה" ו*לא* יוצרת
+    // את התעודה שהתבקשה. כלומר סחורה שיוצאת בלי תעודה, ובלי שאיש יידע.
+    const injects = async (label, key, fn) => {
+      try {
+        await fn(key);
+        check(label, false, "לא נזרקה שגיאה");
+      } catch (err) {
+        check(label, /מחרוזת|ארוך/.test(err.message), err.message);
+      }
+    };
+
+    await injects("הזרקת אופרטור במפתח נחסמת (תעודה ידנית)", { $ne: null }, (key) =>
+      createManual({
+        customerId: cust._id,
+        items: [{ sku: editable[0].sku, quantity: 1 }],
+        issuedBy: TAG,
+        idempotencyKey: key,
+      })
+    );
+    await injects("הזרקת אופרטור במפתח נחסמת (שכפול)", { $ne: null }, (key) =>
+      duplicateNote(base.note._id, { issuedBy: TAG, idempotencyKey: key })
+    );
+    await injects("מערך במפתח נחסם", ["a"], (key) =>
+      duplicateNote(base.note._id, { issuedBy: TAG, idempotencyKey: key })
+    );
+    await injects("מפתח ארוך מדי נחסם", "x".repeat(500), (key) =>
+      duplicateNote(base.note._id, { issuedBy: TAG, idempotencyKey: key })
+    );
+
+    // מפתח ריק הוא "בלי מפתח" ולא שגיאה — הטופס לא תמיד שולח אחד
+    const noKey = await duplicateNote(base.note._id, { issuedBy: TAG, idempotencyKey: "" });
+    check("מפתח ריק נחשב כלא-נשלח", noKey.created === true);
+    await DeliveryNote.deleteMany({ _id: noKey.note._id });
+
+    // ── הצעת מחיר → תעודה ──
+    const quote = await quotesLib.create({
+      customerId: cust._id,
+      items: [
+        { sku: editable[0].sku, quantity: 2, unitPrice: 11 },
+        { sku: editable[1].sku, quantity: 1 },
+      ],
+      createdBy: TAG,
+    });
+    check("הצעת מחיר נוצרה", Boolean(quote.quote?.number));
+    check("הברקוד נשמר על שורות ההצעה", quote.quote.items.every((i) => "barcode" in i));
+    check("מחיר שהוזן ידנית מסומן manual", quote.quote.items[0].priceSource === "manual");
+    check("מחיר שנקבע מהמחירון אינו manual", quote.quote.items[1].priceSource !== "manual");
+    check("שם הקטגוריה נשמר על ההצעה", "categoryName" in quote.quote.items[0]);
+
+    const converted = await quotesLib.convert(quote.quote._id, { issuedBy: TAG });
+    check("ההמרה יצרה תעודה", Boolean(converted.note?.number));
+    check("ההצעה סומנה כאושרה", converted.quote.status === "accepted");
+    check("ההצעה מצביעה על התעודה", String(converted.quote.convertedNote) === String(converted.note._id));
+    check(
+      "המחירים מההצעה עברו כמו שהם",
+      converted.note.items.find((i) => String(i.sku) === String(editable[0].sku)).unitPrice === 11
+    );
+    check("ההמרה לא הפיקה חשבונית", converted.invoices.length === 0);
+
+    // הפקה שנייה מאותה הצעה = חיוב כפול על אותה סחורה
+    await (async () => {
+      try {
+        await quotesLib.convert(quote.quote._id, { issuedBy: TAG });
+        check("המרה שנייה מאותה הצעה נחסמת", false, "לא נזרקה שגיאה");
+      } catch (err) {
+        check("המרה שנייה מאותה הצעה נחסמת", /כבר הומרה/.test(err.message), err.message);
+      }
+    })();
+    check(
+      "ולא נוצרה תעודה שנייה",
+      (await DeliveryNote.countDocuments({ idempotencyKey: `quote:${quote.quote._id}` })) === 1
+    );
+
+    // ── שכפול הצעה ──
+    const quoteCopy = await quotesLib.duplicate(quote.quote._id, { createdBy: TAG });
+    check("ההצעה הועתקה", quoteCopy.number !== quote.quote.number);
+    check("ההעתק נושא את אותן שורות", quoteCopy.items.length === quote.quote.items.length);
+    check("ההעתק פתוח", quoteCopy.status === "open");
+    check("ההעתק אינו יורש את הקישור לתעודה", !quoteCopy.convertedNote);
+
+    // ההעתק כן ניתן להמרה — אחרת "העתק והפק שוב" לא היה עובד
+    const convertedCopy = await quotesLib.convert(quoteCopy._id, { issuedBy: TAG });
+    check("העתק ההצעה כן ניתן להמרה", Boolean(convertedCopy.note?.number));
+
+    await Quote.deleteMany({ _id: { $in: [quote.quote._id, quoteCopy._id] } });
+    await DeliveryNote.deleteMany({
+      _id: { $in: [base.note._id, copy.note._id, copyOfBilled.note._id, converted.note._id, convertedCopy.note._id] },
+    });
   }
 
   // ─────────────────────────────────────────────────────────────────

@@ -1,5 +1,11 @@
 // controller/productController.js
 const Product = require("../models/Product");
+const {
+  barcodeOf,
+  findByBarcode,
+  isSearchableBarcode,
+  MIN_SEARCHABLE_LENGTH,
+} = require("../utils/barcode");
 const mongoose = require("mongoose");
 const Category = require("../models/Category");
 const { languageCodes } = require("../utils/data");
@@ -936,7 +942,10 @@ const getProductsLite = async (req, res) => {
     const products = await Product.find({
       sku: { $exists: true, $nin: [null, ""] },
     })
-      .select("sku title prices.price")
+      // erp.barcode הוא הברקוד שמודפס על התעודות והחשבוניות (ראה
+      // utils/barcode.js). הוא מגיע לבורר כדי שאפשר יהיה גם לחפש לפיו
+      // וגם להציג אותו לצד השם.
+      .select("sku title prices.price erp.barcode")
       .lean();
 
     // Collator אחד לכל המיון; localeCompare לכל השוואה בונה אותו מחדש
@@ -944,6 +953,7 @@ const getProductsLite = async (req, res) => {
     const items = products
       .map((p) => ({
         sku: String(p.sku),
+        barcode: barcodeOf(p) || "",
         name: p.title?.he || p.title?.en || String(p.sku),
         price: Number(p.prices?.price) || 0,
       }))
@@ -952,6 +962,30 @@ const getProductsLite = async (req, res) => {
     res.send({ products: items, total: items.length });
   } catch (err) {
     console.log("getProductsLite error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/**
+ * חיפוש מוצר לפי ברקוד — מה שקורה כשמקלידים או סורקים ברקוד בשורת מסמך.
+ *
+ * מחזיר מערך ולא מוצר בודד בכוונה: הברקוד אינו ייחודי במסד (7 קבוצות
+ * כפולות), ובחירה שקטה של אחד מהם הייתה מכניסה לתעודה את המוצר הלא נכון.
+ * המסך מציג בורר כשחוזר יותר מאחד.
+ */
+const getProductByBarcode = async (req, res) => {
+  try {
+    const code = String(req.params.barcode || "").trim();
+    if (!isSearchableBarcode(code)) {
+      return res.status(400).send({
+        message: `"${code}" אינו ברקוד תקין — נדרשות לפחות ${MIN_SEARCHABLE_LENGTH} ספרות`,
+      });
+    }
+
+    const products = await findByBarcode(code);
+    res.send({ barcode: code, products, total: products.length });
+  } catch (err) {
+    console.log("getProductByBarcode error: ", err);
     res.status(500).send({ message: err.message });
   }
 };
@@ -1626,6 +1660,7 @@ module.exports = {
   checkImportProducts,
   getAllProducts,
   getProductsLite,
+  getProductByBarcode,
   getShowingProducts,
   getCartProducts,
   getFacebookFeedCSV,

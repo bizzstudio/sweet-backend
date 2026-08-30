@@ -14,6 +14,8 @@ const QuoteItemSchema = new mongoose.Schema(
   {
     productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: false },
     sku: { type: String, required: false },
+    // הברקוד של מנוע. ראה DeliveryNote ו-utils/barcode.js
+    barcode: { type: String, required: false },
     name: { type: String, required: true },
     quantity: { type: Number, required: true },
     // ללא מע"מ, כמו בכל המערכת
@@ -21,6 +23,8 @@ const QuoteItemSchema = new mongoose.Schema(
     lineTotal: { type: Number, required: true },
     isVatFree: { type: Boolean, default: false },
     category: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: false },
+    // נשמר כדי שהמרה לתעודת משלוח לא תאבד את הקטגוריה שהחשבונית מפוצלת לפיה
+    categoryName: { type: String, required: false },
     // מאיפה הגיע המחיר — "customerPriceList" / "catalog" / "missing".
     // נשמר כדי שאפשר יהיה לדעת בדיעבד אם הצעה נשענה על מחיר מוסכם או על
     // מחיר קטלוג, בלי לנחש לפי התאריך.
@@ -55,6 +59,9 @@ const quoteSchema = new mongoose.Schema(
 
     subTotal: { type: Number, required: true },
     discount: { type: Number, default: 0 },
+    // כמו בתעודת משלוח: האחוז שהיה בתוקף בהפקה, והסכום שהוא ייצר
+    discountPercent: { type: Number, default: 0 },
+    customerDiscount: { type: Number, default: 0 },
     total: { type: Number, required: true },
 
     validUntil: { type: Date, required: false },
@@ -75,6 +82,17 @@ const quoteSchema = new mongoose.Schema(
       ref: "Order",
       required: false,
     },
+
+    // תעודת המשלוח שהופקה מההצעה בלחיצת כפתור.
+    //
+    // נשמר כדי לחסום הפקה שנייה מאותה הצעה: הצעה אחת שהפכה לשתי תעודות
+    // היא חיוב כפול על אותה סחורה, וזו טעות שמתגלה רק בסוף החודש.
+    convertedNote: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DeliveryNote",
+      required: false,
+    },
+    convertedNoteNumber: { type: Number, required: false },
 
     createdBy: { type: String, required: false },
   },

@@ -1385,13 +1385,45 @@ const updateCustomer = async (req, res) => {
           });
         }
 
-        // הגדרות החיוב. רק splitInvoiceByCategory ניתן לעריכה מהפאנל —
-        // icountClientId נכתב על ידי הסנכרון בלבד, ומסך שהיה דורס אותו
-        // בערך ישן היה גורם ליצירת כרטיס לקוח כפול ב-iCount.
+        // הגדרות החיוב שניתנות לעריכה מהפאנל. icountClientId אינו ביניהן —
+        // הוא נכתב על ידי הסנכרון בלבד, ומסך שהיה דורס אותו בערך ישן היה
+        // גורם ליצירת כרטיס לקוח כפול ב-iCount.
         if (req.body.billing?.splitInvoiceByCategory !== undefined) {
           customer.set(
             "billing.splitInvoiceByCategory",
             !!req.body.billing.splitInvoiceByCategory
+          );
+        }
+
+        // אחוז ההנחה הקבוע של הלקוח. יורד מכל מסמך שמופק לו מכאן והלאה
+        // (תעודה, הצעה, חשבונית) — ראה lib/billing/pricing.
+        //
+        // null = ניקוי מכוון, וחזרה לאחוז שהגיע בייבוא מנוע
+        // (erp.discountPercent). 0 = בלי הנחה, וגובר על הייבוא. ההבחנה
+        // חשובה: לקוח שההנחה שלו בוטלה במפורש אסור שיקבל אותה בחזרה
+        // בייבוא האקסל הבא.
+        if (req.body.billing?.discountPercent !== undefined) {
+          const raw = req.body.billing.discountPercent;
+
+          if (raw === null || raw === "") {
+            customer.set("billing.discountPercent", undefined);
+          } else {
+            const pct = Number(raw);
+            if (!Number.isFinite(pct) || pct < 0 || pct > 100) {
+              return res.status(400).send({
+                message: `אחוז הנחה לא תקין: "${raw}". יש להזין מספר בין 0 ל-100.`,
+              });
+            }
+            customer.set("billing.discountPercent", pct);
+          }
+        }
+
+        // האם החשבונית החודשית מרכזת את השורות לפי קטגוריה, או מפרטת כל
+        // מוצר. ראה lib/billing/monthlyBilling.
+        if (req.body.billing?.summarizeInvoiceLines !== undefined) {
+          customer.set(
+            "billing.summarizeInvoiceLines",
+            !!req.body.billing.summarizeInvoiceLines
           );
         }
 

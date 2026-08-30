@@ -7,6 +7,7 @@ const {
   checkImportProducts,
   getAllProducts,
   getProductsLite,
+  getProductByBarcode,
   getShowingProducts,
   getCartProducts,
   getProductById,
@@ -35,6 +36,9 @@ router.post("/import", isAdmin, importProducts);
 
 // רשימת קטלוג רזה לבוררי מוצרים - לפני "/:id" כדי ש-"lite" לא ייחשב ל-id
 router.get("/lite", isAdmin, getProductsLite);
+
+// חיפוש לפי ברקוד (הקלדה/סריקה בשורת מסמך). לפני "/:id" מאותה סיבה
+router.get("/by-barcode/:barcode", isAdmin, getProductByBarcode);
 
 // get a product
 router.post("/:id", getProductById);

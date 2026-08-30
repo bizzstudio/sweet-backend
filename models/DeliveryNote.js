@@ -35,6 +35,9 @@ const DeliveryNoteItemSchema = new mongoose.Schema(
   {
     productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: false },
     sku: { type: String, required: false },
+    // הברקוד של מנוע (product.erp.barcode), לא product.barcode שריק בכל
+    // הקטלוג. זה השדה שמודפס בעמודת "ברקוד" בתעודה ונשלח ל-iCount —
+    // ההצלבה של הלקוחה נעשית לפיו ולא לפי המק"ט. ראה utils/barcode.js.
     barcode: { type: String, required: false },
     name: { type: String, required: true },
 
@@ -133,11 +136,42 @@ const deliveryNoteSchema = new mongoose.Schema(
     // סכומים לפני מע"מ
     subTotal: { type: Number, required: true },
     shippingCost: { type: Number, default: 0 },
+    // סך ההנחה בשקלים — ההנחה מההזמנה, ההנחה הידנית, וההנחה הקבועה של
+    // הלקוח, ביחד. זה מה שיורד מהסכום.
     discount: { type: Number, default: 0 },
+    // אחוז ההנחה הקבוע של הלקוח כפי שהיה ברגע ההפקה, והסכום שהוא ייצר.
+    //
+    // נשמר על המסמך ולא נגזר מהלקוח בכל קריאה: האחוז יכול להשתנות מחר,
+    // ותעודה שהופקה לפי 5% חייבת להמשיך להסביר את עצמה גם אחרי שהלקוח
+    // עבר ל-3%. בלי זה "למה ירדו כאן 41.25 ₪" הופכת לשאלה בלי תשובה.
+    discountPercent: { type: Number, default: 0 },
+    customerDiscount: { type: Number, default: 0 },
     total: { type: Number, required: true },
 
     issuedAt: { type: Date, default: Date.now },
     issuedBy: { type: String, required: false },
+
+    // התעודה נערכה ביד מהמסך אחרי שנוצרה.
+    //
+    // רלוונטי רק לתעודה אוטומטית, ומטרתו אחת: לעצור את syncFromOrder.
+    // הסנכרון קיים כדי שהתעודה תעקוב אחרי ההזמנה, אבל ברגע שאדם תיקן בה
+    // משהו — כמות שנמסרה בפועל, שורה שהוסרה — התיקון הזה הוא האמת, ודריסה
+    // שלו בעריכה הבאה של ההזמנה הייתה מחזירה בשקט את הנתון השגוי.
+    //
+    // התעודה שנערכה עדיין מסתנכרנת בכיוון אחד: הפער מול ההזמנה נרשם ללוג.
+    manuallyEdited: { type: Boolean, default: false },
+    editedAt: { type: Date, required: false },
+    editedBy: { type: String, required: false },
+
+    // התעודה שממנה הועתקה, אם נוצרה בשכפול. שמור לצורך מעקב: תעודה
+    // שהועתקה נראית זהה לתעודה שהוקלדה מאפס, ובלי זה אי אפשר לענות על
+    // "למה יש כאן פעמיים את אותה סחורה".
+    copiedFrom: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "DeliveryNote",
+      required: false,
+    },
+    copiedFromNumber: { type: Number, required: false },
 
     // מצב החיוב של התעודה מול iCount
     billing: {
