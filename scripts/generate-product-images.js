@@ -26,6 +26,7 @@
 //   node scripts/generate-product-images.js --sku 4423,1177
 //   node scripts/generate-product-images.js --all           // כולל מוצרים מוסתרים
 //   node scripts/generate-product-images.js --no-db         // רק קבצים, בלי עדכון DB
+//   node scripts/generate-product-images.js --with-text     // גם שם המוצר ומק"ט בתוך התמונה
 //   node scripts/generate-product-images.js --size 1000 --concurrency 4
 require("dotenv").config();
 
@@ -51,6 +52,7 @@ const OPTS = {
   force: hasFlag("force"),
   all: hasFlag("all"),
   noDb: hasFlag("no-db"),
+  withText: hasFlag("with-text"),
   limit: Number(getArg("limit", 0)) || 0,
   size: Number(getArg("size", 800)) || 800,
   concurrency: Math.max(1, Number(getArg("concurrency", 6)) || 6),
@@ -382,6 +384,28 @@ const fitText = (text, font, maxWidth, maxLines, sizes) => {
   return { size, lines: kept };
 };
 
+// פריסת ברירת המחדל: אייקון גדול בלבד.
+//
+// למה בלי טקסט: בכרטיס המוצר אזור התמונה נמוך (h-24/h-32) והתמונה מוצגת
+// ב-object-contain, כלומר הריבוע כולו מכווץ לגובה הזה. הגרסה הראשונה דחסה
+// לתוכו גם שם וגם שורת מק"ט — התוצאה הייתה אייקון זעיר וטקסט בלתי קריא,
+// והשם ממילא מופיע מתחת לכרטיס וגם במודל. בלי הטקסט האייקון גדל פי שניים.
+// ‎--with-text מחזיר את הפריסה המלאה למי שרוצה אותה.
+function buildIconSvg({ theme, icon, size }) {
+  const S = size;
+  const iconSize = S * 0.5;
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 ${S} ${S}">
+  <rect width="${S}" height="${S}" fill="#ffffff"/>
+  <circle cx="${S / 2}" cy="${S / 2}" r="${S * 0.36}" fill="${theme.tint}"/>
+  <g transform="translate(${(S - iconSize) / 2} ${(S - iconSize) / 2}) scale(${iconSize / 100})"
+     fill="none" stroke="${theme.ink}" color="${theme.ink}"
+     stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round">
+    ${ICONS[icon] || ICONS.box}
+  </g>
+</svg>`;
+}
+
 function buildSvg({ name, note, meta, theme, icon, size }) {
   const S = size;
   const u = S / 800; // כל המידות תוכננו על קנבס 800 ומתכווצות יחסית
@@ -540,14 +564,16 @@ async function run() {
     iconTally.set(icon, (iconTally.get(icon) || 0) + 1);
 
     const metaParts = [categoryName, product?.erp?.unit, product.sku && `מק"ט ${product.sku}`];
-    const svg = buildSvg({
-      name: main,
-      note,
-      meta: metaParts.filter(Boolean).join(" · "),
-      theme,
-      icon,
-      size: OPTS.size,
-    });
+    const svg = OPTS.withText
+      ? buildSvg({
+          name: main,
+          note,
+          meta: metaParts.filter(Boolean).join(" · "),
+          theme,
+          icon,
+          size: OPTS.size,
+        })
+      : buildIconSvg({ theme, icon, size: OPTS.size });
 
     const file = fileNameFor(product);
     const relPath = `${PUBLIC_PREFIX}/${file}`;

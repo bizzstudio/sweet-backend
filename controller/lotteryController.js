@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const Lottery = require("../models/Lottery");
 const Order = require("../models/Order");
 const Status = require("../models/Status");
+const { getArchiveStatusId } = require("../utils/archiveStatus");
 
 function parseDayBoundary(isoDateStr, endOfDay) {
   if (!isoDateStr || typeof isoDateStr !== "string") return null;
@@ -18,16 +19,26 @@ function parseDayBoundary(isoDateStr, endOfDay) {
 }
 
 async function resolvePaidEligibleStatusFilter() {
-  const [pending, cancel] = await Promise.all([
+  const [pending, cancel, archiveId] = await Promise.all([
     Status.findOne({ name: "Pending" }).select("_id").lean(),
     Status.findOne({ name: "Cancel" }).select("_id").lean(),
+    // ── הזמנת ארכיון אינה כרטיס להגרלה ──
+    //
+    // הסינון כאן הוא $nin, כלומר "כל מה שלא Pending ולא Cancel" — ולכן כל
+    // סטטוס חדש נכנס אליו מאליו. הזמנות ארכיון הן מסמכי הנהח"ש היסטוריים
+    // שיובאו מקובץ (lib/archive-orders), והן נושאות את תאריך המסמך: ייבוא
+    // היסטוריה של לקוח אחד היה מכניס אותו להגרלה על טווח עבר במאות כרטיסים
+    // בבת אחת, בלי שאיש יראה מאיפה הם הגיעו.
+    getArchiveStatusId(),
   ]);
   if (!pending || !cancel) {
     const err = new Error("MISSING_STATUS");
     err.code = "MISSING_STATUS";
     throw err;
   }
-  return { $nin: [pending._id, cancel._id] };
+  return {
+    $nin: [pending._id, cancel._id, ...(archiveId ? [archiveId] : [])],
+  };
 }
 
 /**

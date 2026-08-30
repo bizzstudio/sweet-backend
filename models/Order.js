@@ -278,10 +278,70 @@ const orderSchema = new mongoose.Schema(
       resolvedAt: { type: Date, required: false },
       resolvedBy: { type: String, required: false },
     },
+    // ── הזמנה שנוצרה מייבוא היסטוריה מההנהח"ש ──
+    //
+    // ההזמנה היא תיעוד של מה שכבר קרה: הסחורה יצאה, החשבונית הופקה בהנהח"ש,
+    // והמערכת רק מציגה אותה בכרטיס הלקוח. ‏source="archive" והסטטוס
+    // "הזמנת ארכיון" (utils/archiveStatus) הם מה שמחריג אותה מהדוחות.
+    //
+    // השדה קיים רק על הזמנות כאלה, ולכן קיומו הוא גם הסימן שההזמנה מיובאת.
+    archive: {
+      // מספר המסמך בהנהח"ש (תעודת משלוח / חשבונית). אינו מספר ההזמנה —
+      // ‏invoice מוקצה מהמונה כמו בכל מסלול יצירה אחר, כדי שלא יתנגש
+      // בסדרת המספרים של המערכת.
+      docNumber: { type: String, required: false },
+      docType: { type: String, required: false },
+      docDate: { type: Date, required: false },
+
+      // ── מפתח הזהות של המסמך, וזו הסיבה שהוא קיים ──
+      //
+      // העלאה חוזרת של אותו קובץ (או של קובץ חופף) היא המצב הרגיל: מייצאים
+      // מההנהח"ש טווח רחב יותר ומעלים שוב. בלי מפתח יציב כל העלאה כזו הייתה
+      // מכפילה את ההזמנות בכרטיס הלקוח בשקט. עם המפתח — מסמך שכבר יובא
+      // מתעדכן במקומו.
+      //
+      // הצורה: "<customerId>:<docNumber>", ובשורות בלי מספר מסמך
+      // "<customerId>:d:<YYYY-MM-DD>". הלקוח נכלל במפתח כי מספרי המסמכים
+      // בהנהח"ש אינם ייחודיים בין סוגי מסמכים ובין שנים.
+      sourceKey: { type: String, required: false },
+
+      fileName: { type: String, required: false },
+      importedBy: { type: String, required: false },
+      importedAt: { type: Date, required: false },
+
+      // שורות שהמק"ט שלהן אינו בקטלוג. הן *אינן* בעגלה ואינן בסכום, ולכן זה
+      // המקום היחיד שבו הן מתועדות — בלעדיו ההזמנה נראית שלמה בעוד שחלק
+      // מהסחורה שבמסמך המקורי נעלם ממנה.
+      unmatchedItems: {
+        type: [
+          {
+            sku: { type: String },
+            name: { type: String },
+            quantity: { type: Number },
+            price: { type: Number },
+            _id: false,
+          },
+        ],
+        required: false,
+        default: undefined,
+      },
+    },
   },
   {
     timestamps: true,
   }
+);
+
+// ‏sourceKey מזהה מסמך הנהח"ש אחד של לקוח אחד. האינדקס הייחודי הוא מה שהופך
+// העלאה חוזרת של אותו קובץ לעדכון במקום לשכפול — היבוא מחפש לפיו, והאינדקס
+// דואג ששני כותבים מקבילים לא ייצרו שתי הזמנות לאותו מסמך.
+//
+// ‏partialFilterExpression על $type: "string" מוציא מהאינדקס את כל ההזמנות
+// הרגילות, שאין להן את השדה כלל — בלעדיו אינדקס unique היה נכשל עליהן על
+// ערכי null כפולים.
+orderSchema.index(
+  { "archive.sourceKey": 1 },
+  { unique: true, partialFilterExpression: { "archive.sourceKey": { $type: "string" } } }
 );
 
 // מספר ההזמנה אינו מוקצה כאן ואינו דרך פלאגין AutoIncrement, אלא במונה אטומי

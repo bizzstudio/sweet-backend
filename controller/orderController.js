@@ -19,6 +19,20 @@ const { sendEmail, sendOrderNotificationEmail } = require('../lib/email-sender/s
 const { whatsappErrorEmailBody } = require('../lib/email-sender/templates/whatsapp-error');
 const { handleProductQuantity } = require('../lib/stock-controller/others');
 const { getIngestionErrorStatusId } = require('../utils/ingestionStatus');
+// ── החרגת הזמנות הארכיון ──
+//
+// הזמנת ארכיון היא תיעוד של מסמך הנהח"ש שכבר חויב (ראה
+// lib/archive-orders/buildArchiveOrders.js). היא אינה הכנסה חדשה, ולכן כל
+// שאילתה שסוכמת כסף או סופרת הזמנות חייבת להוציא אותה — אחרת הדשבורד מציג
+// את אותה מכירה פעמיים, פעם מהמערכת ופעם מההיסטוריה שיובאה.
+//
+// רוב הדוחות כאן בנויים על $in של סטטוסים מוכרים, ולכן הם מחריגים אותה
+// מעצמם. ‏excludeArchive נועד לשאילתות שאינן מסננות לפי סטטוס בכלל — ובהן
+// דווקא ההשמטה שקטה לגמרי.
+const {
+  getArchiveStatusId,
+  archiveExclusionFilter: excludeArchive,
+} = require('../utils/archiveStatus');
 const Offer = require("../models/Offer");
 const { editOrderItems, OrderEditError } = require("../lib/orders/editItems");
 dayjs.extend(utc);
@@ -143,6 +157,16 @@ const getAllOrders = async (req, res) => {
   const skip = (pages - 1) * limits;
 
   try {
+    // ── הזמנות ארכיון: מוחרגות, אלא אם ביקשו אותן במפורש ──
+    //
+    // המסך הזה משרת שני דברים — רשימת ההזמנות וגם "מכירות לפי מוצר לפי יום"
+    // כשנשלח טווח תאריכים. ארכיון שנכלל בו היה מכפיל מכירות היסטוריות בדוח.
+    // מנגד, סינון לפי הסטטוס "הזמנת ארכיון" חייב להחזיר אותן — אחרת אין שום
+    // מסך שבו אפשר לראות מה יובא.
+    if (!queryObject.status) {
+      Object.assign(queryObject, await excludeArchive());
+    }
+
     // total orders count
     const totalDoc = await Order.countDocuments(queryObject);
     // כשמסננים לפי תאריך – מחזירים מסמך מלא (כולל cart) כדי שהדשבורד "מכירות לפי מוצר לפי יום" יציג מוצרים
@@ -416,6 +440,11 @@ const getCompletedOrders = async (req, res) => {
     // הייתה נחשבת "הושלמה" ומופיעה למלקטים.
     const ingestionErrorStatusId = await getIngestionErrorStatusId();
 
+    // הזמנת ארכיון היא מסמך היסטורי ולא הזמנה שהושלמה עכשיו. אותו נימוק
+    // בדיוק כמו ב"שגיאה בקריאה": השאילתה היא $nin, וסטטוס שלא הוחרג בה
+    // מפורשות נספר כ"הושלמה" ומופיע למלקטים.
+    const archiveStatusId = await getArchiveStatusId();
+
     const statusIds = [
       cancelStatus._id,
       pendingStatus._id,
@@ -423,6 +452,7 @@ const getCompletedOrders = async (req, res) => {
       deliveredStatus._id,
       likutStatus._id,
       ...(ingestionErrorStatusId ? [ingestionErrorStatusId] : []),
+      ...(archiveStatusId ? [archiveStatusId] : []),
     ];
 
     // שאילתה של ההזמנות שלא כוללות את אחד מהסטטוסים הרשמיים
@@ -690,7 +720,15 @@ const sendOrderAndUpdateStatus = async (req, res) => {
 
 const getOrderCustomer = async (req, res) => {
   try {
-    const orders = await Order.find({ user: req.params.id }).populate({ path: "status" }).sort({ _id: -1 });
+    // ── מיון לפי createdAt ולא לפי _id ──
+    //
+    // השניים זהים לכל הזמנה שנוצרה בזמן אמת (חותמת הזמן טבועה ב-ObjectId),
+    // אבל **לא** להזמנת ארכיון: היא נוצרת היום ונושאת את תאריך המסמך
+    // מלפני שנתיים. מיון לפי _id היה מקפיץ ייבוא היסטוריה לראש רשימת
+    // ההזמנות של הלקוח, מעל ההזמנות האחרונות שלו.
+    const orders = await Order.find({ user: req.params.id })
+      .populate({ path: "status" })
+      .sort({ createdAt: -1 });
     res.send(orders);
   } catch (err) {
     console.log('getOrderCustomer error: ', err);
@@ -1070,7 +1108,9 @@ const getDashboardRecentOrder = async (req, res) => {
     const limits = Number(limit) || 8;
     const skip = (pages - 1) * limits;
 
-    const queryObject = {};
+    // "ההזמנות האחרונות" בדשבורד — ארכיון שיובא היום היה מציף אותן במסמכים
+    // בני שנתיים, כי המיון הוא לפי createdAt וההזמנה נושאת את תאריך המסמך.
+    const queryObject = { ...(await excludeArchive()) };
 
     // queryObject.$or = [
     //   { status: { $regex: `Pending`, $options: "i" } },
@@ -1502,8 +1542,12 @@ const getDashboardAmount = async (req, res) => {
 
 const bestSellerProductChart = async (req, res) => {
   try {
-    const totalDoc = await Order.countDocuments({});
+    const notArchive = await excludeArchive();
+    const totalDoc = await Order.countDocuments(notArchive);
     const bestSellingProduct = await Order.aggregate([
+      {
+        $match: notArchive,
+      },
       {
         $unwind: "$cart",
       },
@@ -1567,16 +1611,24 @@ const getDashboardOrders = async (req, res) => {
     // המזהים של הסטטוסים שבליקוט כרגע
     const melaketStatusIds = melaketStatuses.map(status => status._id);
 
-    const totalDoc = await Order.countDocuments({});
+    // ארבע השאילתות הבאות אינן מסננות לפי סטטוס כלל, ולכן הן היחידות כאן
+    // שהזמנת ארכיון הייתה נכנסת אליהן — וסכום ההכנסות הכולל היה גדל בכל
+    // ייבוא היסטוריה.
+    const notArchive = await excludeArchive();
+
+    const totalDoc = await Order.countDocuments(notArchive);
 
     // query for orders
-    const orders = await Order.find({})
+    const orders = await Order.find(notArchive)
       .populate({ path: "status" })
       .sort({ _id: -1 })
       .skip(skip)
       .limit(limits);
 
     const totalAmount = await Order.aggregate([
+      {
+        $match: notArchive,
+      },
       {
         $group: {
           _id: null,
@@ -1588,10 +1640,13 @@ const getDashboardOrders = async (req, res) => {
     ]);
 
     // total order amount
-    const todayOrder = await Order.find({ createdAt: { $gte: start } }).populate({ path: "status" });
+    const todayOrder = await Order.find({ ...notArchive, createdAt: { $gte: start } }).populate({ path: "status" });
 
     // this month order amount
     const totalAmountOfThisMonth = await Order.aggregate([
+      {
+        $match: notArchive,
+      },
       {
         $group: {
           _id: {

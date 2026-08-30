@@ -25,6 +25,7 @@
     "ingest:replay": "node script/replay-failed-orders.js",
     "vocab:test": "node script/test-catalog-vocabulary.js",
     "order:delete-error": "node script/delete-ingestion-error-order.js",
+    "archive:group-test": "node script/test-archive-grouping.js",
     "import:preflight": "node script/import-preflight.js",
     "stock:set": "node script/set-stock.js",
     "prices:set": "node script/set-prices.js",

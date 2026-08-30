@@ -806,12 +806,18 @@ const getOrderCustomer = async (req, res) => {
       },
     ]);
 
+    // ── מיון לפי createdAt ולא לפי _id ──
+    //
+    // השניים זהים לכל הזמנה שנוצרה בזמן אמת (חותמת הזמן טבועה ב-ObjectId),
+    // אבל **לא** להזמנת ארכיון: היא נוצרת היום ונושאת את תאריך המסמך
+    // מלפני שנתיים. מיון לפי _id היה מקפיץ ייבוא היסטוריה לראש רשימת
+    // ההזמנות של הלקוח, מעל ההזמנות האחרונות שלו.
     const orders = await Order.find({
       user: req.user._id,
     })
       .select(CUSTOMER_HIDDEN_FIELDS)
       .populate({ path: 'status' })
-      .sort({ _id: -1 })
+      .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limits);
 

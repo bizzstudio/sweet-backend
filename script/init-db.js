@@ -190,7 +190,23 @@ const run = async () => {
     },
     { upsert: true }
   );
-  console.log(`סטטוסים: ${statuses.length + 1}`);
+
+  // "הזמנת ארכיון" — הזמנות שיובאו מקובץ ההיסטוריה של ההנהח"ש. אותה סיבה
+  // בדיוק להיעדר phone: המסמך כבר חויב בהנהח"ש, וספירתו שוב בדוחות מכפילה
+  // את ההכנסה. (ראה utils/archiveStatus.js — שם אותה רשומה נוצרת גם בזמן ריצה)
+  await Status.updateOne(
+    { name: "Archive" },
+    {
+      $setOnInsert: {
+        name: "Archive",
+        heName: "הזמנת ארכיון",
+        color: "#6b7280",
+        isActive: true,
+      },
+    },
+    { upsert: true }
+  );
+  console.log(`סטטוסים: ${statuses.length + 2}`);
 
   const adminExists = await Admin.findOne({ email: ADMIN_EMAIL.toLowerCase() });
   if (adminExists) {

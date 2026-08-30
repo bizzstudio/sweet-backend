@@ -10,6 +10,14 @@
 // הסיכום למוצר אחד לכל מק"ט נעשה **כאן ולא שם**: מה שהדפדפן שולח אינו נתון
 // מהימן, וספירת "כמה פעמים הלקוח קנה" היא בדיוק המספר שקובע אילו שורות יאושרו
 // אוטומטית בהזמנות עתידיות.
+//
+// ── שני דברים נוצרים מאותו קובץ ──
+//
+// 1. **פרופיל הרכישות** (CustomerPurchaseHistory) — סטטיסטיקה מסוכמת שהצינור
+//    משתמש בה כשובר שוויון. נדרס בכל יבוא.
+// 2. **הזמנות ארכיון** — שחזור המסמכים עצמם כהזמנות בסטטוס "הזמנת ארכיון",
+//    כדי שההיסטוריה תיראה בכרטיס הלקוח כפי שהיא. אופציונלי (createOrders),
+//    ומתעדכן במקומו ולא נדרס. ראה lib/archive-orders/buildArchiveOrders.js.
 
 const mongoose = require("mongoose");
 
@@ -31,6 +39,10 @@ const {
   extractQualifiers,
   applyQualifiers,
 } = require("../lib/order-ingestion/qualifiers");
+const {
+  previewArchiveOrders,
+  importArchiveOrders,
+} = require("../lib/archive-orders/buildArchiveOrders");
 
 // ── תקרה לשורות בבקשה אחת ──
 //
@@ -218,7 +230,14 @@ const findCustomer = async (customerId) => {
   if (!mongoose.Types.ObjectId.isValid(String(customerId || ""))) return null;
   // ‏+erp במפורש: השדה מוגדר select:false בסכמה, והוא מה שמאפשר לוודא
   // שהקובץ שייך ללקוח הזה (ראה importCustomerHistory)
-  return Customer.findById(customerId).select("_id name lastName email +erp").lean();
+  //
+  // ‏phone ו-address נשלפים בשביל הזמנות הארכיון: הן נבנות מהמסמך הזה
+  // (lib/archive-orders/buildArchiveOrders.buildUserInfo), ובלעדיהם כל
+  // הזמנה שנוצרת יוצאת עם user_info.contact ריק וכתובת ריקה — כלומר
+  // הזמנה שאי אפשר למצוא בחיפוש לפי טלפון, ובלי שום סימן לכך.
+  return Customer.findById(customerId)
+    .select("_id name lastName email phone address +erp")
+    .lean();
 };
 
 const customerLabel = (customer) =>
@@ -629,6 +648,18 @@ const checkImportCustomerHistory = async (req, res) => {
       .select("itemsCount importedAt")
       .lean();
 
+    // ── תצוגה מקדימה של הזמנות הארכיון ──
+    //
+    // נמדדת תמיד ולא רק כשהתיבה מסומנת: המספר הזה הוא מה שגורם למי שמעלה
+    // לדעת שהאפשרות קיימת ומה היא תעשה בפועל. כשלון בה אינו הופך בדיקה
+    // תקינה לשגיאה — היא מידע, לא נכונות.
+    let archiveOrders = null;
+    try {
+      archiveOrders = await previewArchiveOrders({ customer, rows });
+    } catch (err) {
+      console.log("previewArchiveOrders error: ", err);
+    }
+
     res.send({
       customer: String(customer._id),
       customerName: customerLabel(customer),
@@ -653,6 +684,7 @@ const checkImportCustomerHistory = async (req, res) => {
         ? { itemsCount: existing.itemsCount || 0, importedAt: existing.importedAt || null }
         : null,
       impact,
+      archiveOrders,
     });
   } catch (err) {
     console.log("checkImportCustomerHistory error: ", err);
@@ -770,8 +802,38 @@ const importCustomerHistory = async (req, res) => {
       }
     }
 
+    // ── הזמנות הארכיון ──
+    //
+    // רצות **אחרי** שהפרופיל נשמר, ולא במקביל: הפרופיל הוא מה שמשפיע על
+    // קליטת הזמנות עתידיות, והוא חייב להישמר גם אם שחזור המסמכים נכשל.
+    // כשלון כאן מדווח למסך ואינו מבטל יבוא שכבר הצליח — ההפך היה משאיר את
+    // מי שמעלה עם הודעת שגיאה על פעולה שחציה בוצעה.
+    let archiveOrders = null;
+    if (req.body?.createOrders === true) {
+      try {
+        archiveOrders = await importArchiveOrders({
+          customer,
+          rows,
+          fileName: toText(req.body?.fileName).slice(0, MAX_NAME_LENGTH),
+          importedBy: req.user?.email || "",
+        });
+      } catch (err) {
+        console.log("importArchiveOrders error: ", err);
+        archiveOrders = { error: err.message };
+      }
+    }
+
+    const archiveSummary = archiveOrders?.error
+      ? ` (יצירת הזמנות הארכיון נכשלה: ${archiveOrders.error})`
+      : archiveOrders
+        ? `, ונוצרו ${archiveOrders.created} הזמנות ארכיון` +
+          (archiveOrders.updated ? ` (${archiveOrders.updated} עודכנו)` : "")
+        : "";
+
     res.send({
-      message: `ההיסטוריה נשמרה: ${withProducts.length} מוצרים מתוך ${rows.length} שורות`,
+      message:
+        `ההיסטוריה נשמרה: ${withProducts.length} מוצרים מתוך ${rows.length} שורות` +
+        archiveSummary,
       customer: String(customer._id),
       received: rows.length,
       imported: withProducts.length,
@@ -787,6 +849,7 @@ const importCustomerHistory = async (req, res) => {
       spanTo: saved?.spanTo || to,
       itemsCount: saved?.itemsCount || withProducts.length,
       importedAt: saved?.importedAt || now,
+      archiveOrders,
     });
   } catch (err) {
     console.log("importCustomerHistory error: ", err);
