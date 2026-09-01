@@ -338,6 +338,15 @@ deliveryNoteSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
 // "מה עוד לא הוקלד" — תעודות ידניות של הזמנה מסוימת
 deliveryNoteSchema.index({ order: 1, kind: 1 });
 
+// דוח הרכישות (lib/billing/purchaseReport): טווח תאריכי הנפקה, ממוין
+// מהחדש לישן. בלי האינדקס הזה השאילתה סורקת את כל הקולקציה *וממיינת
+// בזיכרון* — מיון חוסם שנופל ב-32MB, כלומר דווקא על טווח רחב הדוח היה
+// מחזיר שגיאה במקום תשובה.
+//
+// אינדקס אחד ולא שניים: הדוח ללקוח בודד נשען על האינדקס שמתחיל ב-customer,
+// והמיון שם רץ על התעודות של לקוח אחד בלבד.
+deliveryNoteSchema.index({ issuedAt: -1 });
+
 const DeliveryNote = mongoose.model("DeliveryNote", deliveryNoteSchema);
 
 // כמו ב-Order: אם האינדקס הייחודי לא נבנה בגלל כפילויות קיימות, השרת היה

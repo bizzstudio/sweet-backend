@@ -38,7 +38,8 @@
     "history:test": "node script/test-purchase-history.js",
     "history:pipeline-test": "node script/test-history-pipeline.js",
     "history:aggregate-test": "node script/test-history-aggregate.js",
-    "link:test": "node script/test-link-follow.js"
+    "link:test": "node script/test-link-follow.js",
+    "report:test": "node script/test-purchase-report.js"
   },
   "author": "המתוקים של בני",
   "license": "ISC",

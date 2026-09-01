@@ -8,6 +8,7 @@ const {
   getAllProducts,
   getProductsLite,
   getProductByBarcode,
+  bulkChangeCategory,
   getShowingProducts,
   getCartProducts,
   getProductById,
@@ -39,6 +40,10 @@ router.get("/lite", isAdmin, getProductsLite);
 
 // חיפוש לפי ברקוד (הקלדה/סריקה בשורת מסמך). לפני "/:id" מאותה סיבה
 router.get("/by-barcode/:barcode", isAdmin, getProductByBarcode);
+
+// העברת מוצרים לקטגוריה אחרת באצווה. לפני "/:id", וכשדה יחיד שניתן
+// לשינוי - בניגוד ל-"/update/many" שמקבל כל שדה שנשלח אליו
+router.patch("/bulk-category", isAdmin, bulkChangeCategory);
 
 // get a product
 router.post("/:id", getProductById);

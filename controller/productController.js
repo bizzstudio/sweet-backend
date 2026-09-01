@@ -939,13 +939,18 @@ const getAllProducts = async (req, res) => {
 // (lib/billing/pricing) יודע לתמחר.
 const getProductsLite = async (req, res) => {
   try {
+    // מסך שיוך הקטגוריות צריך גם מזהה וגם קטגוריה נוכחית. הם אינם
+    // חוזרים כברירת מחדל בכוונה: בוררי המוצר טוענים את הקטלוג בכל מסך
+    // חיוב, ושני שדות נוספים על 4,320 שורות הם עוד רבע מגה בכל טעינה.
+    const withCategory = String(req.query?.withCategory || "") === "1";
+
     const products = await Product.find({
       sku: { $exists: true, $nin: [null, ""] },
     })
       // erp.barcode הוא הברקוד שמודפס על התעודות והחשבוניות (ראה
       // utils/barcode.js). הוא מגיע לבורר כדי שאפשר יהיה גם לחפש לפיו
       // וגם להציג אותו לצד השם.
-      .select("sku title prices.price erp.barcode")
+      .select(`sku title prices.price erp.barcode${withCategory ? " category" : ""}`)
       .lean();
 
     // Collator אחד לכל המיון; localeCompare לכל השוואה בונה אותו מחדש
@@ -956,12 +961,79 @@ const getProductsLite = async (req, res) => {
         barcode: barcodeOf(p) || "",
         name: p.title?.he || p.title?.en || String(p.sku),
         price: Number(p.prices?.price) || 0,
+        ...(withCategory
+          ? { _id: String(p._id), category: p.category ? String(p.category) : "" }
+          : {}),
       }))
       .sort((a, b) => collator.compare(a.name, b.name));
 
     res.send({ products: items, total: items.length });
   } catch (err) {
     console.log("getProductsLite error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/**
+ * העברת מוצרים לקטגוריה אחרת, באצווה.
+ *
+ * נבנה כדי לאייש קטגוריה חדשה ("כיבוד") מתוך קטגוריה קיימת ("מזון") בלי
+ * לפתוח 3,591 מוצרים אחד-אחד.
+ *
+ * למה לא updateManyProducts הקיים: הוא מקבל את גוף הבקשה כמו שהוא ומריץ
+ * ‎$set על כל שדה שנשלח. זה מספיק כדי לשנות מחירים, מלאי או כל שדה אחר
+ * במאות מוצרים בבקשה אחת. כאן השדה היחיד שניתן לשנות הוא הקטגוריה,
+ * והוא נבדק מול המסד לפני הכתיבה.
+ *
+ * category *וגם* categories מתעדכנים יחד: הראשון קובע את הפיצול בחשבונית
+ * (lib/billing/monthlyBilling), השני הוא מה שהחנות מסננת לפיו. עדכון של
+ * אחד בלי השני משאיר מוצר שמופיע בחשבונית תחת קטגוריה אחת ובחנות תחת אחרת.
+ */
+const MAX_BULK_CATEGORY = 1000;
+
+const bulkChangeCategory = async (req, res) => {
+  try {
+    const { ids, category } = req.body || {};
+
+    if (!Array.isArray(ids) || !ids.length) {
+      return res.status(400).send({ message: "לא נבחרו מוצרים" });
+    }
+    if (ids.length > MAX_BULK_CATEGORY) {
+      return res
+        .status(400)
+        .send({ message: `יותר מ-${MAX_BULK_CATEGORY} מוצרים בבקשה אחת` });
+    }
+
+    // כל מזהה נבדק בנפרד: מזהה פגום אחד בתוך מערך היה מפיל את השאילתה
+    // כולה בשגיאת cast סתומה, אחרי שהמשתמשת סימנה 200 מוצרים
+    const bad = ids.filter((id) => !mongoose.Types.ObjectId.isValid(String(id)));
+    if (bad.length) {
+      return res.status(400).send({ message: `מזהי מוצר לא תקינים: ${bad.length}` });
+    }
+    if (!mongoose.Types.ObjectId.isValid(String(category))) {
+      return res.status(400).send({ message: "מזהה קטגוריה לא תקין" });
+    }
+
+    // קיום הקטגוריה נבדק במסד ולא נסמך על המסך: שיוך למזהה שאינו קיים
+    // מוציא את המוצרים מכל סינון בחנות ומכל פיצול בחשבונית, בשקט
+    const target = await Category.findById(category).select("name").lean();
+    if (!target) {
+      return res.status(404).send({ message: "הקטגוריה לא נמצאה" });
+    }
+
+    const result = await Product.updateMany(
+      { _id: { $in: ids } },
+      { $set: { category: target._id, categories: [target._id] } }
+    );
+
+    const name = target.name?.he || target.name?.en || "";
+    res.send({
+      message: `${result.modifiedCount} מוצרים הועברו לקטגוריית "${name}"`,
+      matched: result.matchedCount,
+      modified: result.modifiedCount,
+    });
+  } catch (err) {
+    console.log("bulkChangeCategory error: ", err);
     res.status(500).send({ message: err.message });
   }
 };
@@ -1661,6 +1733,7 @@ module.exports = {
   getAllProducts,
   getProductsLite,
   getProductByBarcode,
+  bulkChangeCategory,
   getShowingProducts,
   getCartProducts,
   getFacebookFeedCSV,

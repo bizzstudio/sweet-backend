@@ -81,6 +81,11 @@ router.get("/customer/:customerId/open-invoices", isAdmin, billingController.get
 // כל המסמכים של הלקוח במקום אחד — לכרטיס הלקוח
 router.get("/customer/:customerId/documents", isAdmin, billingController.getCustomerDocuments);
 
+// --- דוחות ---
+// דוח רכישות לקוחות: מה קנו ובאילו תעודות.
+// ?from=YYYY-MM-DD&to=YYYY-MM-DD&customer=<id>&kind=auto|manual
+router.get("/reports/customer-purchases", isAdmin, billingController.getCustomerPurchaseReport);
+
 // --- חשבוניות וגבייה ---
 // ?status=paid|unpaid|overdue&customer=<id>
 router.get("/invoices", isAdmin, billingController.getInvoices);

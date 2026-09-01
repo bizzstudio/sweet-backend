@@ -16,6 +16,7 @@ const quotes = require("../lib/billing/quotes");
 const { priceItemsForCustomer, priceQuality } = require("../lib/billing/pricing");
 const { listInvoices } = require("../lib/billing/invoices");
 const { listReceipts, isDayString } = require("../lib/billing/receipts");
+const { customerPurchaseReport, SOURCES } = require("../lib/billing/purchaseReport");
 const { calculateVat } = require("../lib/billing/vat");
 const {
   createReceipt,
@@ -734,6 +735,29 @@ const createReceiptForPayment = async (req, res) => {
 };
 
 /**
+ * אימות הסינון המשותף למסכים שמסננים לפי לקוח וטווח ימים (קבלות, דוח
+ * רכישות): מזהה פסול היה מפוצץ את השאילתה ב-CastError ומחזיר 500 סתמי,
+ * ותאריך פסול שנבלע בשקט מציג רשימה מלאה שנראית כמו תוצאה של הסינון.
+ *
+ * @returns {string|null} הודעת השגיאה, או null כשהקלט תקין
+ */
+const invalidCustomerDateRange = ({ customer, from, to } = {}) => {
+  if (customer && !isValidId(customer)) return "מזהה לקוח לא תקין";
+
+  for (const [label, value] of [["ההתחלה", from], ["הסיום", to]]) {
+    if (value && !isDayString(value)) {
+      return `תאריך ${label} אינו תקין (נדרש YYYY-MM-DD)`;
+    }
+  }
+
+  if (isDayString(from) && isDayString(to) && from > to) {
+    return "תאריך הסיום מוקדם מתאריך ההתחלה";
+  }
+
+  return null;
+};
+
+/**
  * כל הקבלות שהופקו דרך המערכת, לפי טווח תאריכי תשלום ולקוח.
  *
  * הרשימה נבנית מהתעודות שסומנו כמשולמות (lib/billing/receipts), ולכן
@@ -744,24 +768,60 @@ const getReceipts = async (req, res) => {
   try {
     const { customer, from, to } = req.query;
 
-    // מזהה פסול היה מפוצץ את השאילתה ב-CastError ומחזיר 500 סתמי
-    if (customer && !isValidId(customer)) {
-      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
-    }
-    // תאריך פסול לא נבלע בשקט: סינון שלא סונן מציג רשימה מלאה שנראית
-    // כמו התוצאה של הטווח שנבחר
-    for (const [label, value] of [["ההתחלה", from], ["הסיום", to]]) {
-      if (value && !isDayString(value)) {
-        return res
-          .status(400)
-          .send({ message: `תאריך ${label} אינו תקין (נדרש YYYY-MM-DD)` });
-      }
-    }
-    if (isDayString(from) && isDayString(to) && from > to) {
-      return res.status(400).send({ message: "תאריך הסיום מוקדם מתאריך ההתחלה" });
-    }
+    const invalid = invalidCustomerDateRange(req.query);
+    if (invalid) return res.status(400).send({ message: invalid });
 
     res.send({ receipts: await listReceipts({ customerId: customer, from, to }) });
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/**
+ * דוח רכישות לקוחות — "מה קנו, ובאילו תעודות".
+ *
+ * נבנה מתעודות המשלוח (lib/billing/purchaseReport) ולא מההזמנות, כי
+ * התעודה היא מה שנמסר בפועל וההזמנה היא מה שהתבקש.
+ *
+ * ?source=orders|notes&from=YYYY-MM-DD&to=YYYY-MM-DD&customer=<id>&kind=auto|manual
+ *
+ * source=orders (ברירת מחדל) — מה הוזמן, ההיסטוריה המלאה.
+ * source=notes — מה נמסר וחויב בפועל. kind רלוונטי לתעודות בלבד.
+ *
+ * כשמועבר customer, גם חתך המוצרים מצטמצם ללקוח הזה — וכך אותו נתיב
+ * עונה גם על "מה כל הלקוחות קנו" וגם על "מה הלקוח הזה קנה".
+ */
+const getCustomerPurchaseReport = async (req, res) => {
+  try {
+    const { source, customer, from, to, kind, includeCancelled } = req.query;
+
+    const invalid = invalidCustomerDateRange(req.query);
+    if (invalid) return res.status(400).send({ message: invalid });
+
+    if (source && !SOURCES.includes(source)) {
+      return res.status(400).send({ message: "מקור נתונים לא מוכר" });
+    }
+    if (kind && !["auto", "manual"].includes(kind)) {
+      return res.status(400).send({ message: "סוג תעודה לא מוכר" });
+    }
+    // סינון שאינו רלוונטי למקור נדחה ולא נבלע: דוח שמתעלם בשקט מסינון
+    // שנשלח אליו מציג יותר שורות ממה שהתבקש, בלי שאיש יידע
+    if (kind && source === "orders") {
+      return res
+        .status(400)
+        .send({ message: "סוג תעודה רלוונטי רק לדוח שמבוסס על תעודות משלוח" });
+    }
+
+    res.send(
+      await customerPurchaseReport({
+        source,
+        customerId: customer,
+        from,
+        to,
+        kind,
+        includeCancelled: includeCancelled === "true",
+      })
+    );
   } catch (err) {
     res.status(500).send({ message: err.message });
   }
@@ -1338,6 +1398,7 @@ module.exports = {
   convertQuote,
   getCustomerOpenInvoices,
   getCustomerDocuments,
+  getCustomerPurchaseReport,
   icountMode,
   demoOptions,
   createDemoInvoice,

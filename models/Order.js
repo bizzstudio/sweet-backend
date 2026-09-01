@@ -505,6 +505,11 @@ orderSchema.post("updateOne", syncFromQuery);
 orderSchema.post("updateMany", syncFromQuery);
 
 // 3) יוצרים את המודל
+// דוח הרכישות (lib/billing/purchaseReport) ומסך ההזמנות: טווח תאריכים
+// ממוין מהחדש לישן. בלי האינדקס המיון נעשה בזיכרון על כל הקולקציה —
+// מיון חוסם שגדל עם כל הזמנה שנקלטת.
+orderSchema.index({ createdAt: -1 });
+
 const Order = mongoose.model("Order", orderSchema);
 
 // בניית האינדקסים נעשית ברקע בעליית השרת, וכשלון בה אינו מפיל את התהליך —
