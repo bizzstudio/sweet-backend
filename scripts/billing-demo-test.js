@@ -45,6 +45,7 @@ const { createFromOrder } = require("../lib/billing/deliveryNotes");
 const { splitByNoteKind } = require("../lib/billing/manualItems");
 const { closeMonth, previousMonth, creditInvoice, releaseStuckClaims } =
   require("../lib/billing/monthlyBilling");
+const { reissueInvoice } = require("../lib/billing/reissue");
 const { listInvoices } = require("../lib/billing/invoices");
 const { listReceipts } = require("../lib/billing/receipts");
 const { createReceipt } = require("../lib/icount/documents");
@@ -129,7 +130,37 @@ const cleanup = async () => {
   check("התוצאה מסומנת כדמו", result.demo === true);
   check("הופקה חשבונית", result.invoicesCreated >= 1, `${result.invoicesCreated}`);
   check("נוצר מסמך ב-iCount", issued.length >= 1, `${issued.length}`);
-  check("שורות החשבונית הן שורות התעודה", issued[0].items.length === note.items.length);
+  // ⚠️ הבדיקה הזאת הושוותה פעם ל-note.items.length בלבד, והיא נכשלה על
+  //    התנהגות תקינה משתי סיבות: סגירת חודש סוגרת את *כל* התעודות
+  //    הפתוחות של הלקוח ולא רק את זו שהבדיקה יצרה, ולקוח עם ריכוז שורות
+  //    מקבל שורה לקטגוריה ולא שורה למוצר. שתיהן תלויות במה שיש במסד
+  //    באותו רגע. מה שנכון בכל מצב הוא הסכום ומקור השורות, וזה מה שנבדק.
+  const money2 = (n) => Number((Number(n) || 0).toFixed(2));
+  const sumOf = (rows) => money2(rows.reduce((s, i) => s + (Number(i.lineTotal) || 0), 0));
+
+  const closedNotes = await DeliveryNote.find({
+    "billing.demo.icountDocNum": issued[0].docNum,
+  }).lean();
+
+  // שורת המשלוח מתווספת לחשבונית מעבר לשורות התעודות; ההנחה יורדת בשדה
+  // נפרד ולא כשורה, ולכן אינה נכנסת לחישוב הזה
+  const notesSum = money2(
+    closedNotes.reduce(
+      (s, n) => s + n.items.reduce((a, i) => a + (Number(i.lineTotal) || 0), 0) + (Number(n.shippingCost) || 0),
+      0
+    )
+  );
+
+  check(
+    "החשבונית נסגרה על התעודה שנוצרה",
+    closedNotes.some((n) => String(n._id) === String(note._id)),
+    `${closedNotes.length} תעודות`
+  );
+  check(
+    "סכום שורות החשבונית = סכום שורות התעודות שנסגרו",
+    sumOf(issued[0].items) === notesSum,
+    `${sumOf(issued[0].items)} מול ${notesSum}`
+  );
 
   const after = await DeliveryNote.findById(note._id).lean();
   const demoNum = after.billing.demo?.icountDocNum;
@@ -180,6 +211,30 @@ const cleanup = async () => {
     "החשבונית מסומנת כשולמה",
     afterPay.find((i) => i.docNum === demoNum)?.paidAt != null
   );
+
+  // ─────────────────────────────────────────────────────────────────
+  // הזיכוי והחשבונית החדשה נרשמים בכיס הדמו, אבל deliveryNotes.update
+  // ו-cancel כותבים לתעודה עצמה ולא לכיס. תעודה שנראית בדמו כמחויבת היא
+  // תעודה פתוחה של לקוח אמיתי, ולכן תיקון תוכן בדמו חסום.
+  group("תיקון חשבונית — עריכת תעודה חסומה בדמו");
+
+  issued = [];
+  try {
+    await reissueInvoice({
+      icountDocNum: demoNum,
+      reason: "בדיקה",
+      allowPaid: true,
+      edits: [{ noteId: String(note._id), discount: 1 }],
+    });
+    check("עריכת תעודה בדמו נחסמת", false, "לא נזרקה שגיאה");
+  } catch (err) {
+    check("עריכת תעודה בדמו נחסמת", /מצב הדגמה/.test(err.message), err.message);
+  }
+
+  const guarded = await DeliveryNote.findById(note._id).lean();
+  check("התעודה לא נערכה", !guarded.manuallyEdited);
+  check("והיא עדיין מחויבת בכיס הדמו", guarded.billing.demo?.status === "billed");
+  check("ולא הופק שום מסמך", issued.length === 0, `${issued.length}`);
 
   // ─────────────────────────────────────────────────────────────────
   group("זיכוי מחזיר את התעודה לחיוב — בכיס הדמו");

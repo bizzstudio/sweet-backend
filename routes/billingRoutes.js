@@ -92,7 +92,13 @@ router.get("/invoices", isAdmin, billingController.getInvoices);
 // הסכום המחייב מ-iCount, לפני רישום תשלום
 router.get("/invoices/:docnum/total", isAdmin, billingController.getInvoiceTotal);
 
-// ריכוז התעודות שהחשבונית סגרה — הנספח המודפס שמצורף אליה
+// ריכוז התעודות שהחשבונית סגרה — הנספח המודפס שמצורף אליה.
+// ?items=1 מוסיף את שורות התעודות, למסך התיקון
 router.get("/invoices/:docnum/notes", isAdmin, billingController.getInvoiceNotes);
+
+// תיקון חשבונית והפקתה מחדש: זיכוי מלא, תיקון התעודות, חשבונית חדשה.
+// POST ולא PATCH — אין כאן עריכה של משאב קיים אלא הפקת שני מסמכי מס
+// חדשים, וחשבונית מס אינה ניתנת לעריכה לא אצלנו ולא ב-iCount.
+router.post("/invoices/:docnum/reissue", isAdmin, billingController.reissueInvoiceDoc);
 
 module.exports = router;

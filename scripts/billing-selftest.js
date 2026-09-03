@@ -40,6 +40,7 @@ const {
 } = require("../lib/billing/manualItems");
 const { groupIntoInvoices, summarizeItems, shouldSummarize, describeInvoice, previousMonth, isLastDayOfMonth, releaseStuckClaims, closeMonth, billNoteImmediately } = require("../lib/billing/monthlyBilling");
 const { isNoteTriggerStatus } = require("../lib/billing/autoDeliveryNote");
+const { reissueInvoice } = require("../lib/billing/reissue");
 const { dueDateFor, forCustomer } = require("../lib/billing/paymentTerms");
 const { priceItemsForCustomer, priceQuality, discountPercentFor, discountAmount } = require("../lib/billing/pricing");
 const { listInvoices } = require("../lib/billing/invoices");
@@ -1627,6 +1628,191 @@ const cleanup = async () => {
     await DeliveryNote.deleteMany({
       _id: { $in: [base.note._id, copy.note._id, copyOfBilled.note._id, converted.note._id, convertedCopy.note._id] },
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  group("תיקון חשבונית והפקה מחדש — שומרי הסף");
+
+  // כל הבדיקות כאן נופלות *לפני* שיוצא מסמך, וזו כל הנקודה: הזיכוי הוא
+  // מסמך מס בלתי הפיך, ובדיקה שמתגלה אחריו משאירה את הלקוח בלי חשבונית.
+  // אף אחת מהן אינה פונה ל-iCount.
+  {
+    const REISSUE_DOC = "TEST-REISSUE-1";
+    const anyCustomer = await Customer.findOne().select("_id name").lean();
+
+    const mkBilled = async (extra = {}) =>
+      DeliveryNote.create({
+        number: await nextFreeNumber(),
+        kind: "manual",
+        customer: anyCustomer._id,
+        customerSnapshot: { name: "בדיקת תיקון" },
+        items: [{ name: "פריט בדיקה", sku: "SELFTEST", quantity: 2, unitPrice: 10, lineTotal: 20 }],
+        subTotal: 20,
+        total: 20,
+        issuedBy: `${TAG}-reissue`,
+        billing: {
+          status: "billed",
+          billingMonth: "2026-08",
+          icountDocNum: REISSUE_DOC,
+          billedAt: new Date(),
+          ...(extra.billing || {}),
+        },
+      });
+
+    const noteA = await mkBilled();
+
+    const rejects = async (name, args, pattern) => {
+      try {
+        await reissueInvoice(args);
+        check(name, false, "לא נזרקה שגיאה");
+      } catch (err) {
+        check(name, pattern.test(err.message), err.message);
+      }
+    };
+
+    await rejects(
+      "חשבונית שאינה קיימת נדחית",
+      { icountDocNum: "TEST-REISSUE-NONE", reason: "בדיקה" },
+      /לא נמצאו תעודות/
+    );
+    await rejects(
+      "תיקון בלי סיבה נדחה",
+      { icountDocNum: REISSUE_DOC, reason: "  " },
+      /סיבת תיקון/
+    );
+    await rejects(
+      'מק"ט שאינו בקטלוג נדחה לפני הזיכוי',
+      {
+        icountDocNum: REISSUE_DOC,
+        reason: "בדיקה",
+        edits: [{ noteId: String(noteA._id), items: [{ sku: "לא-קיים-בקטלוג", quantity: 1, unitPrice: 5 }] }],
+      },
+      /אינם קיימים בקטלוג/
+    );
+    await rejects(
+      "שורות ריקות נדחות",
+      {
+        icountDocNum: REISSUE_DOC,
+        reason: "בדיקה",
+        edits: [{ noteId: String(noteA._id), items: [] }],
+      },
+      /לפחות שורה אחת/
+    );
+    await rejects(
+      "כמות אפס נדחית",
+      {
+        icountDocNum: REISSUE_DOC,
+        reason: "בדיקה",
+        edits: [{ noteId: String(noteA._id), items: [{ sku: "SELFTEST", quantity: 0, unitPrice: 5 }] }],
+      },
+      /כמות|מק"ט/
+    );
+    await rejects(
+      "הנחה גדולה מסכום התעודה נדחית",
+      { icountDocNum: REISSUE_DOC, reason: "בדיקה", edits: [{ noteId: String(noteA._id), discount: 5000 }] },
+      /ההנחה/
+    );
+    await rejects(
+      "תאריך מסירה עתידי נדחה",
+      {
+        icountDocNum: REISSUE_DOC,
+        reason: "בדיקה",
+        edits: [{ noteId: String(noteA._id), issuedAt: "2099-01-01" }],
+      },
+      /לעתיד/
+    );
+    await rejects(
+      "הסרת כל התעודות נדחית",
+      {
+        icountDocNum: REISSUE_DOC,
+        reason: "בדיקה",
+        edits: [{ noteId: String(noteA._id), remove: true }],
+      },
+      /זיכוי בלבד/
+    );
+    await rejects(
+      "אותה תעודה פעמיים נדחית",
+      {
+        icountDocNum: REISSUE_DOC,
+        reason: "בדיקה",
+        edits: [
+          { noteId: String(noteA._id), discount: 1 },
+          { noteId: String(noteA._id), discount: 2 },
+        ],
+      },
+      /פעמיים/
+    );
+
+    // שתי בקשות במקביל = שני מסמכי זיכוי על אותה חשבונית. הנעילה נתפסת
+    // בחלק הסינכרוני של הקריאה, ולכן הבקשה השנייה נדחית עוד לפני
+    // שהראשונה הספיקה לגעת במסד — בדיקה דטרמיניסטית ולא תלוית תזמון.
+    {
+      const badEdit = [
+        { noteId: String(noteA._id), items: [{ sku: "לא-קיים-בקטלוג", quantity: 1, unitPrice: 5 }] },
+      ];
+      const first = reissueInvoice({ icountDocNum: REISSUE_DOC, reason: "בדיקה", edits: badEdit });
+      const second = reissueInvoice({ icountDocNum: REISSUE_DOC, reason: "בדיקה" });
+
+      const [r1, r2] = await Promise.allSettled([first, second]);
+      check(
+        "בקשה מקבילה על אותה חשבונית נדחית",
+        r2.status === "rejected" && /כבר רץ כרגע/.test(r2.reason.message),
+        r2.status === "rejected" ? r2.reason.message : "לא נדחתה"
+      );
+      check("והראשונה נדחתה מהסיבה שלה", r1.status === "rejected");
+
+      // הנעילה משתחררת גם כשהתיקון נכשל, אחרת החשבונית נחסמת עד לריסטארט
+      let released = false;
+      try {
+        await reissueInvoice({ icountDocNum: REISSUE_DOC, reason: "בדיקה", edits: badEdit });
+      } catch (err) {
+        released = !/כבר רץ כרגע/.test(err.message);
+      }
+      check("הנעילה משתחררת אחרי כשלון", released);
+    }
+
+    // תעודה של חשבונית אחרת אינה יכולה להיגרר לתיקון הזה
+    const foreign = await mkBilled({ billing: { icountDocNum: "TEST-REISSUE-OTHER" } });
+    await rejects(
+      "תעודה שאינה שייכת לחשבונית נדחית",
+      {
+        icountDocNum: REISSUE_DOC,
+        reason: "בדיקה",
+        edits: [{ noteId: String(foreign._id), discount: 1 }],
+      },
+      /אינה חלק מהחשבונית/
+    );
+
+    // חשבונית ששולמה: הזיכוי מנתק את הקבלה, ולכן נדרש אישור מפורש
+    const paid = await mkBilled({
+      billing: {
+        icountDocNum: "TEST-REISSUE-PAID",
+        receiptDocNum: "TEST-RCPT-R",
+        paidAt: new Date(),
+      },
+    });
+    await rejects(
+      "חשבונית ששולמה נדחית בלי אישור",
+      { icountDocNum: "TEST-REISSUE-PAID", reason: "בדיקה" },
+      /נרשם תשלום/
+    );
+
+    // ולא נגענו בכלום: כל התעודות עדיין חויבו, ואף זיכוי לא נרשם
+    const untouched = await DeliveryNote.find({
+      _id: { $in: [noteA._id, foreign._id, paid._id] },
+    })
+      .select("billing")
+      .lean();
+    check(
+      "אף תעודה לא נפתחה מחדש בבדיקות שנדחו",
+      untouched.every((n) => n.billing.status === "billed")
+    );
+    check(
+      "ולא נרשם זיכוי",
+      untouched.every((n) => !(n.billing.credits || []).length)
+    );
+
+    await DeliveryNote.deleteMany({ _id: { $in: [noteA._id, foreign._id, paid._id] } });
   }
 
   // ─────────────────────────────────────────────────────────────────

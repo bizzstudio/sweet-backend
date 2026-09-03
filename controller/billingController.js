@@ -12,6 +12,7 @@ const Quote = require("../models/Quote");
 const Customer = require("../models/Customer");
 const deliveryNotes = require("../lib/billing/deliveryNotes");
 const monthlyBilling = require("../lib/billing/monthlyBilling");
+const { reissueInvoice } = require("../lib/billing/reissue");
 const quotes = require("../lib/billing/quotes");
 const { priceItemsForCustomer, priceQuality } = require("../lib/billing/pricing");
 const { listInvoices } = require("../lib/billing/invoices");
@@ -644,6 +645,79 @@ const creditInvoice = async (req, res) => {
   }
 };
 
+/**
+ * תיקון חשבונית והפקתה מחדש.
+ *
+ * חשבונית מס אינה ניתנת לעריכה, ולכן "עריכה" כאן היא שלושה שלבים:
+ * זיכוי מלא, תיקון התעודות שמאחוריה, והפקת חשבונית חדשה במקומה.
+ * הפירוט והנימוקים ב-lib/billing/reissue.
+ *
+ * מחזיר 200 גם כשחלק מהשלבים נכשלו, כל עוד הזיכוי יצא: הוא מסמך מס
+ * שכבר קיים, ותשובת שגיאה שמסתירה אותו הייתה משאירה את מי שלחץ בלי
+ * לדעת שיש זיכוי פתוח. מה שנכשל חוזר ב-problems.
+ */
+const reissueInvoiceDoc = async (req, res) => {
+  try {
+    const { reason, edits, allowPaid, emailDocument } = req.body || {};
+    const docNum = String(req.params.docnum || "").trim();
+    if (!docNum) return res.status(400).send({ message: "חסר מספר חשבונית" });
+
+    const list = edits === undefined ? [] : edits;
+    if (!Array.isArray(list)) {
+      return res.status(400).send({ message: "רשימת התיקונים חייבת להיות מערך" });
+    }
+    if (list.length > MAX_ITEMS_PER_REQUEST) {
+      return res
+        .status(400)
+        .send({ message: `יותר מ-${MAX_ITEMS_PER_REQUEST} תעודות בבקשה אחת` });
+    }
+    const lineCount = list.reduce(
+      (sum, e) => sum + (Array.isArray(e?.items) ? e.items.length : 0),
+      0
+    );
+    if (lineCount > MAX_ITEMS_PER_REQUEST) {
+      return res
+        .status(400)
+        .send({ message: `יותר מ-${MAX_ITEMS_PER_REQUEST} שורות בבקשה אחת` });
+    }
+    // findIndex ולא find: פריט פסול יכול להיות null או 0, ואלה נבלעים
+    // בבדיקת `if (badEntry)` ועוברים הלאה כאילו הבקשה תקינה
+    const badIndex = list.findIndex(
+      (e) => !e || typeof e !== "object" || Array.isArray(e) || !isValidId(e.noteId)
+    );
+    if (badIndex !== -1) {
+      return res
+        .status(400)
+        .send({ message: `תיקון לא תקין במקום ${badIndex + 1} ברשימה` });
+    }
+
+    const result = await reissueInvoice({
+      icountDocNum: docNum,
+      reason,
+      edits: list,
+      allowPaid: allowPaid === true,
+      emailDocument: typeof emailDocument === "boolean" ? emailDocument : undefined,
+      changedBy: adminName(req),
+    });
+
+    // שלוש הודעות ולא אחת. "הופקה חשבונית" על ריצה שחצייה נכשל היא
+    // בדיוק ההודעה שגורמת למי שלחץ לסגור את המסך ולא לקרוא את הפירוט.
+    const message =
+      result.stage === "credited"
+        ? `חשבונית זיכוי ${result.creditDocNum} הופקה, אך החשבונית החדשה לא הופקה — ` +
+          `${result.noteCount} תעודות פתוחות וממתינות לחיוב`
+        : result.stage === "partial"
+        ? `חשבונית ${result.docNums.join(", ")} הופקה במקום ${docNum} ` +
+          `(זיכוי ${result.creditDocNum}), אך ${result.problems.length} שלבים לא הושלמו`
+        : `חשבונית ${result.docNums.join(", ")} הופקה במקום ${docNum} ` +
+          `(זיכוי ${result.creditDocNum})`;
+
+    res.send({ message, ...result });
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
 // ---------- קבלה ----------
 
 const createReceiptForPayment = async (req, res) => {
@@ -1005,10 +1079,14 @@ const getInvoiceNotes = async (req, res) => {
     const docNum = String(req.params.docnum || "").trim();
     if (!docNum) return res.status(400).send({ message: "חסר מספר חשבונית" });
 
+    // ?items=1 מחזיר גם את השורות עצמן. הנספח המודפס אינו זקוק להן
+    // (הוא טבלת תעודות, לא טבלת מוצרים), ומסך התיקון אינו יכול בלעדיהן.
+    const withItems = String(req.query.items || "") === "1";
+
     const notes = ledger.normalizeAll(
       await DeliveryNote.find({ [ledger.f("icountDocNum")]: docNum })
         .select(
-          "number kind orderNumber manualReference issuedAt items subTotal shippingCost discount customerDiscount discountPercent total customer customerSnapshot billing"
+          "number kind orderNumber manualReference issuedAt items subTotal shippingCost discount customerDiscount discountPercent total customer customerSnapshot notes billing"
         )
         .sort({ number: 1 })
         .lean()
@@ -1018,6 +1096,7 @@ const getInvoiceNotes = async (req, res) => {
       return res.status(404).send({ message: `לא נמצאו תעודות לחשבונית ${docNum}` });
     }
 
+    const paidNote = notes.find((n) => n.billing?.paidAt);
     const round = (n) => Number((Number(n) || 0).toFixed(2));
     const itemsTotal = notes.reduce(
       (sum, n) => sum + (n.items || []).reduce((s, i) => s + (Number(i.lineTotal) || 0), 0),
@@ -1030,6 +1109,16 @@ const getInvoiceNotes = async (req, res) => {
       docNum,
       docUrl: notes[0].billing?.icountDocUrl || null,
       billedAt: notes[0].billing?.billedAt || null,
+      // מצב התשלום. מסך התיקון חייב אותו: זיכוי מנתק את הקבלה מהחשבונית,
+      // וזו אזהרה שצריכה להופיע לפני הלחיצה ולא כשגיאה אחריה.
+      //
+      // מכל התעודות ולא מהראשונה: סימון התשלום נעשה ב-updateMany על כל
+      // התעודות של החשבונית, אבל כשלון חלקי שם מותר במפורש (הקבלה כבר
+      // הופקה ואי אפשר לבטלה). בדיקה על הראשונה בלבד הייתה מחמיצה מצב
+      // מעורב — והשרת, שבודק את כולן, היה דוחה את התיקון בלי שהמסך
+      // הציג את תיבת האישור שמאפשרת להמשיך.
+      paidAt: paidNote?.billing?.paidAt || null,
+      receiptDocNum: paidNote?.billing?.receiptDocNum || null,
       customer: notes[0].customer,
       customerSnapshot: notes[0].customerSnapshot || null,
       notes: notes.map((n) => ({
@@ -1048,6 +1137,21 @@ const getInvoiceNotes = async (req, res) => {
         // הסכום שמודפס על התעודה עצמה ("סה"כ לפני מע"מ"). זה המספר
         // שהלקוח מצליב מולו, ולכן הוא זה שמופיע בטבלה
         total: round(n.total),
+        ...(withItems
+          ? {
+              items: n.items || [],
+              notes: n.notes || "",
+              // ההנחה הקבועה של הלקוח, בנפרד מההנחה שהוקלדה. המסך חייב
+              // את ההפרדה כדי לא להחזיר לשרת את ההנחה האוטומטית כאילו
+              // הוקלדה ביד — היא הייתה מתווספת שוב על עצמה
+              customerDiscount: round(n.customerDiscount),
+              discountPercent: Number(n.discountPercent) || 0,
+              // מצב החיוב של התעודה. חשבונית שכבר זוכתה בלי פתיחה מחדש
+              // משאירה את מספר המסמך על תעודות מבוטלות, והמסך חייב לומר
+              // זאת לפני שממלאים בו טופס שלם שיידחה בשליחה
+              billingStatus: n.billing?.status || null,
+            }
+          : {}),
       })),
       totals: {
         noteCount: notes.length,
@@ -1386,6 +1490,7 @@ module.exports = {
   openCustomers,
   closeMonth,
   creditInvoice,
+  reissueInvoiceDoc,
   createReceiptForPayment,
   getReceipts,
   priceItems,

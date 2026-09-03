@@ -20,8 +20,14 @@ const DeliveryNote = require("../models/DeliveryNote");
 
 const APPLY = process.argv.includes("--apply");
 // גם QA-: סקריפטי בדיקה ידניים משתמשים בקידומת הזו, וריצה שקרסה באמצע
-// משאירה תעודות אמיתיות מסומנות כמחויבות בחשבונית שאינה קיימת
-const TEST_DOC = /^(TEST|QA)-/;
+// משאירה תעודות אמיתיות מסומנות כמחויבות בחשבונית שאינה קיימת.
+//
+// MOCK- נוסף ב-02/09/26: scripts/billing-integration-test.js מחליף את
+// iCount בפונקציה מדומה שמחזירה MOCK-1000, וקורא ל-createFromOrder על
+// הזמנות אמיתיות — אותה מלכודת בדיוק שתוקנה ב-billing-selftest. תעודה
+// אמיתית שנחתמה כך נראית מחויבת, ולכן *לא* נכנסת לסגירת החודש: הסחורה
+// יוצאת ולא מחויבת לעולם.
+const TEST_DOC = /^(TEST|QA|MOCK)/;
 
 (async () => {
   await mongoose.connect(process.env.MONGO_URI || process.env.MONGODB_URI);

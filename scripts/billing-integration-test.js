@@ -58,6 +58,32 @@ const group = (t) => console.log(`\n── ${t} ${"─".repeat(Math.max(0, 54 - 
 
 const cleanup = async () => {
   await DeliveryNote.deleteMany({ issuedBy: { $regex: TAG } });
+
+  // ⚠️ מחיקה לפי issuedBy אינה מספיקה, וזו הייתה תקלה אמיתית (02/09/26):
+  //    createFromOrder מחזיר את התעודה *הקיימת* כשכבר יש כזו להזמנה,
+  //    ולכן הבדיקה חותמת MOCK-1000 על תעודות אמיתיות שנוצרו בזרימה
+  //    הרגילה — issuedBy שלהן הוא updateOrder/orderIngestion, והמחיקה
+  //    שלמעלה פוסחת עליהן. תעודה כזו נראית "מחויבת", ולכן נופלת מכל
+  //    שאילתת סגירת חודש: הסחורה יוצאת ולא מחויבת לעולם.
+  //
+  //    מספר מסמך שמתחיל ב-MOCK נוצר אך ורק כאן, ולכן ההחזרה הזאת
+  //    בטוחה. אותו תיקון בדיוק, לריצות שקרסו באמצע:
+  //    node scripts/repair-selftest-pollution.js --apply
+  await DeliveryNote.updateMany(
+    { "billing.icountDocNum": { $regex: "^MOCK" } },
+    {
+      $set: { "billing.status": "open" },
+      $unset: {
+        "billing.icountDocNum": "",
+        "billing.icountDocType": "",
+        "billing.icountDocUrl": "",
+        "billing.icountDocEmailedTo": "",
+        "billing.billedAt": "",
+        "billing.claimToken": "",
+      },
+    }
+  );
+
   await mongoose.connection.db.collection("app_counters").deleteOne({ _id: "delivery_note" });
 };
 

@@ -35,6 +35,7 @@ const {
 } = require('../utils/archiveStatus');
 const Offer = require("../models/Offer");
 const { editOrderItems, OrderEditError } = require("../lib/orders/editItems");
+const { duplicateOrder: duplicateOrderCore, OrderDuplicateError } = require("../lib/orders/duplicateOrder");
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
@@ -2098,12 +2099,43 @@ const updateOrderItems = async (req, res) => {
   }
 };
 
+
+// POST /api/orders/:id/duplicate — "הזמנה חוזרת": יצירת הזמנה חדשה מהעתק
+// של הזמנה קיימת. הלוגיקה עצמה ב-lib/orders/duplicateOrder, כדי שסקריפט
+// יוכל לקרוא לה בלי לעבור דרך HTTP — בדיוק כמו editOrderItems.
+const duplicateOrder = async (req, res) => {
+  try {
+    const { order, dropped, priceChanges, stockWarnings } = await duplicateOrderCore(req.params.id, {
+      // req.user נקבע ב-isAdmin, ולא נלקח מגוף הבקשה: התיעוד ב-systemNote
+      // צריך לומר מי באמת ביצע
+      createdBy: req.user?.email || undefined,
+    });
+
+    res.status(201).send({
+      message: `נוצרה הזמנה חוזרת מספר ${order.invoice}`,
+      order,
+      orderId: order._id,
+      invoice: order.invoice,
+      dropped,
+      priceChanges,
+      stockWarnings,
+    });
+  } catch (err) {
+    if (err instanceof OrderDuplicateError) {
+      return res.status(err.status).send({ message: err.message, code: err.code });
+    }
+    console.error("duplicateOrder error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
 module.exports = {
   getAllOrders,
   getOrderById,
   getOrderCustomer,
   updateOrder,
   updateOrderItems,
+  duplicateOrder,
   updateOrderWebHook,
   deleteOrder,
   bestSellerProductChart,

@@ -6,6 +6,7 @@ const {
   getOrderCustomer,
   updateOrder,
   updateOrderItems,
+  duplicateOrder,
   deleteOrder,
   bestSellerProductChart,
   getDashboardOrders,
@@ -54,6 +55,9 @@ router.get("/:id", isAdmin, getOrderById);
 // עריכת שורות ההזמנה — לפני "/:id" אינו נדרש (נתיב באורך אחר), אבל
 // נשמר לידו כדי ששני מסלולי העדכון יישבו במקום אחד
 router.put("/:id/items", isAdmin, updateOrderItems);
+
+// "הזמנה חוזרת" — יצירת הזמנה חדשה מהעתק של הזמנה קיימת
+router.post("/:id/duplicate", isAdmin, duplicateOrder);
 
 // update a order
 router.put("/:id", isAdmin, updateOrder);

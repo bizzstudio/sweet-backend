@@ -537,6 +537,7 @@ const importCustomers = async (req, res) => {
       const customerNumber = toImportText(row?.customerNumber);
       const name = toImportText(row?.name);
       const email = toImportText(row?.email).toLowerCase();
+      const contactEmail = toImportText(row?.contactEmail).toLowerCase();
       const phone = toImportText(row?.phone);
 
       if (!name) {
@@ -558,7 +559,14 @@ const importCustomers = async (req, res) => {
       }
 
       if (byNumber.has(customerNumber)) report.duplicates += 1;
-      byNumber.set(customerNumber, { ...row, customerNumber, name, email, phone });
+      byNumber.set(customerNumber, {
+        ...row,
+        customerNumber,
+        name,
+        email,
+        contactEmail,
+        phone,
+      });
     }
 
     const validRows = [...byNumber.values()];
@@ -677,6 +685,19 @@ const importCustomers = async (req, res) => {
 
         const set = { erp };
         if (options.updateName) set.name = row.name;
+        // המייל המשני נכתב רק כשהוא באמת מופיע בקובץ. קובץ שבו עמודת
+        // "איש קשר" ריקה אינו אמור למחוק כתובת שהוקלדה ידנית בכרטיס.
+        //
+        // ולא כשהיא כבר המייל הראשי של הלקוח: עד 09/2026 כתובת מעמודת
+        // "איש קשר" הועלתה להיות המייל הראשי, ו-37 לקוחות בקובץ הנוכחי
+        // נוצרו כך. בלי הבדיקה הזו הייבוא הבא היה כותב להם את אותה כתובת
+        // גם כמייל משני, והכרטיס היה מציג אותה פעמיים ברצף
+        if (
+          row.contactEmail &&
+          row.contactEmail !== toImportText(existing.email).toLowerCase()
+        ) {
+          set.contactEmail = row.contactEmail;
+        }
         if (options.updatePhone && row.phone) set.phone = row.phone;
         if (options.updateAddress && (row.address || row.city || row.postalCode)) {
           set.address = buildCustomerAddress(row, existing.address);
@@ -725,6 +746,15 @@ const importCustomers = async (req, res) => {
             name: row.name,
             lastName: "",
             email,
+            // המייל שהופיע בעמודת "איש קשר" בקובץ. נשמר כפרט קשר בלבד -
+            // הוא לא הופך למייל הראשי, ולא נשלח אליו דבר.
+            // מפתח שמתווסף רק כשיש ערך, ולא contactEmail: undefined: מנהל
+            // ההתקן של מונגו מסדר undefined כ-null כשלא מבקשים ממנו אחרת,
+            // וזה היה כותב null לשדה מחרוזת ב-461 רשומות.
+            // אותה כתובת בשני השדות אינה מייל שני - ראה הענף של העדכון
+            ...(row.contactEmail && row.contactEmail !== email
+              ? { contactEmail: row.contactEmail }
+              : {}),
             phone: row.phone || "",
             address: buildCustomerAddress(row),
             isRegistered: false,
@@ -1348,6 +1378,7 @@ const updateCustomer = async (req, res) => {
       // בדיקת התפקיד עולה שאילתה, ולכן היא נעשית רק כשהבקשה בכלל מנסה לגעת
       // בשדות האלה - עדכון פרופיל רגיל מהחנות לא משלם עליה
       const touchesStaffFields =
+        req.body.contactEmail !== undefined ||
         req.body.erp !== undefined ||
         req.body.billing !== undefined ||
         req.body.welcomeGift !== undefined ||
@@ -1402,6 +1433,30 @@ const updateCustomer = async (req, res) => {
 
         if (req.body.welcomeGift?.isUsed !== undefined) {
           customer.set("welcomeGift.isUsed", !!req.body.welcomeGift.isUsed);
+        }
+
+        // המייל המשני של איש הקשר. מוגבל לצוות ולא נערך מהחנות: זה פרט
+        // הנהח"ש שאיש הצוות מנהל, ולא חלק מהפרופיל שהלקוח עורך בעצמו.
+        //
+        // אותה בדיקה כמו בכתובת החשבוניות, ולא רגקס נוסף: שתי גרסאות של
+        // "מה נחשב כתובת תקינה" נוטות להיפרד. isDeliverableEmail פוסל גם
+        // את המזהים הפנימיים מהייבוא (erp-N@import.local), וזה רצוי - הם
+        // לא כתובת של איש קשר אלא ממלא מקום שלנו.
+        if (req.body.contactEmail !== undefined) {
+          const raw = req.body.contactEmail;
+          if (raw !== null && typeof raw !== "string") {
+            return res.status(400).send({ message: "מייל איש קשר אינו תקין." });
+          }
+
+          const contactEmail = String(raw || "").trim().toLowerCase();
+          if (contactEmail && !isDeliverableEmail(contactEmail)) {
+            return res
+              .status(400)
+              .send({ message: `"${contactEmail}" אינה כתובת מייל תקינה.` });
+          }
+
+          // ריק = ניקוי מכוון של השדה ($unset, ולא מחרוזת ריקה)
+          customer.contactEmail = contactEmail || undefined;
         }
 
         // מיזוג ולא השמה: הטופס שולח רק את השדות שהוא מציג. ללקוח שנרשם
@@ -1503,6 +1558,7 @@ const updateCustomer = async (req, res) => {
         name: updatedUser.name,
         lastName: updatedUser.lastName,
         email: updatedUser.email,
+        contactEmail: updatedUser.contactEmail,
         address: updatedUser.address,
         phone: updatedUser.phone,
         image: updatedUser.image,
