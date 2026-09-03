@@ -19,6 +19,13 @@ const {
   isWelcomeGiftCartItem,
   hasUnusedWelcomeGift,
 } = require("../utils/welcomeGift");
+const { PAYMENT_DISABLED, NO_PAYMENT_METHOD } = require("../utils/paymentDisabled");
+const { finalizeOrder } = require("../lib/orders/finalizeOrder");
+
+// גיל מינימלי לטיוטה שמותר למחוק כשהסליקה כבויה (שלב 2 ב-addOrder).
+// חמש דקות — הרבה מעבר לזמן הסגירה של הזמנה (מאות אלפיות שנייה), והרבה
+// פחות מהזמן שבו טיוטה נחשבת נטושה.
+const STALE_DRAFT_AGE_MS = 5 * 60 * 1000;
 
 const ADD_ORDER_ERROR_ALERT_EMAIL =
   process.env.ADD_ORDER_ERROR_ALERT_EMAIL || "office@bizzstudio.co.il";
@@ -41,8 +48,27 @@ const addOrder = async (req, res) => {
     // שלב 1: השמת המזהה של הסטטוס במקום המילה עצמה
     const status = await Status.findOne({ name: "Pending" });
 
-    // שלב 2: מחיקת הזמנה קודמת אם קיימת
-    const isOrderExist = await Order.findOne({ user: req.user._id, status: status._id });
+    /*
+     * שלב 2: מחיקת הזמנה קודמת אם קיימת.
+     *
+     * המשמעות המקורית: "התחלת הזמנה ולא שילמת" — הטיוטה הישנה מוחלפת בחדשה.
+     *
+     * בחנות ללא תשלום (PAYMENT_DISABLED) ההזמנה לא נשארת Pending אלא נסגרת
+     * מיד באותה בקשה, ולכן מוסיפים כאן חלון גיל: מוחקים רק טיוטה **ישנה**
+     * (שארית מלפני כיבוי הסליקה, או ניסיון שנכשל באמצע).
+     *
+     * בלי הסייג הזה נפתח מירוץ אמיתי: שתי שליחות במקביל (שתי לשוניות/מכשירים)
+     * — השנייה מוצאת את ההזמנה של הראשונה כשהיא עדיין Pending, לפני שהיא
+     * הספיקה לעבור ל-Processing, ומוחקת הזמנה שכבר הורידה מלאי והפיקה תעודת
+     * משלוח. במסלול התשלום המצב הזה לא היה קיים כי הטיוטה נשארה Pending עד
+     * שהלקוח סיים לשלם בדף חיצוני.
+     * ראה utils/paymentDisabled.js
+     */
+    const staleDraftQuery = { user: req.user._id, status: status._id };
+    if (PAYMENT_DISABLED) {
+      staleDraftQuery.createdAt = { $lt: new Date(Date.now() - STALE_DRAFT_AGE_MS) };
+    }
+    const isOrderExist = await Order.findOne(staleDraftQuery);
     if (isOrderExist) {
       await Order.findByIdAndDelete(isOrderExist._id);
     }
@@ -542,7 +568,11 @@ const addOrder = async (req, res) => {
       usedOfferIds: usedOfferIds, // שמירת המבצעים שנוצלו
       coupon: coupon ? coupon._id : null, // רק קופון שאומת בשלב 7 – לא קופון ישן מ-req.body
       shippingRewardEligible: shippingRewardEligible, // מחושב בשרת — לא סומכים על req.body
-      rewardCouponCode: null, // מונפק ב-WebHook לאחר תשלום מוצלח (מונע הזרקה מהקליינט)
+      rewardCouponCode: null, // מונפק בסגירת ההזמנה (מונע הזרקה מהקליינט)
+      // חנות ללא תשלום: הקליינט שולח "creditCard" תמיד, ואסור לסמוך עליו כאן —
+      // הזמנה שלא נסלקה חייבת להיראות ככזו בחשבונית, באדמין ובעמוד ה-/success.
+      // ראה utils/paymentDisabled.js
+      ...(PAYMENT_DISABLED ? { paymentMethod: NO_PAYMENT_METHOD } : {}),
     });
     const order = await newOrder.save();
     console.log("Order saved successfully:", order._id);
@@ -566,6 +596,79 @@ const addOrder = async (req, res) => {
     // שלב 13: שליחת בקשת תשלום ל-Cardcom
     // יצירת טוקן גישה להזמנה (למקרה של אורחים)
     const orderToken = tokenForOrder(order._id.toString());
+
+    // חנות ללא תשלום: אין סליקה כלל. ההזמנה נסגרת כאן ועכשיו — בדיוק באותם
+    // צעדים שה-webhook של קארדקום היה מבצע אחרי תשלום מוצלח (מלאי, קופון,
+    // מבצעים, מייל) — והלקוח מופנה ישירות לעמוד התודה.
+    // ראה utils/paymentDisabled.js ו-lib/orders/finalizeOrder.js
+    if (PAYMENT_DISABLED) {
+      // populate על status ו-coupon: finalizeOrder קורא את שם הסטטוס הקודם
+      // ליומן, ואת הקופון כדי לסמן אותו כמנוצל.
+      const orderToFinalize = await Order.findById(order._id)
+        .populate("coupon")
+        .populate("status");
+
+      try {
+        await finalizeOrder(orderToFinalize, {
+          cardInfo: null,
+          functionName: "addOrder (PAYMENT_DISABLED)",
+        });
+      } catch (finalizeError) {
+        /*
+         * הסגירה נכשלה אחרי שההזמנה כבר נשמרה. שתי החלטות כאן, ושתיהן
+         * מכוונות למנוע אובדן הזמנה:
+         *
+         * 1. לא מחזירים שגיאה ללקוח. ההזמנה *נשמרה* — בדיוק מה שהכפתור הבטיח.
+         *    שגיאה הייתה שולחת אותו להזמין שוב ויוצרת כפילות.
+         * 2. מקדמים את ההזמנה ל-Processing בכתיבה ישירה. הזמנה שנשארת
+         *    ב-Pending היא "טיוטה" מבחינת שלב 2, והזמנה עתידית של אותו לקוח
+         *    הייתה מוחקת אותה בשקט.
+         *
+         * מה שנכשל (מלאי / קופון / תעודת משלוח / מייל) נשאר לא-בוצע ודורש
+         * בדיקה ידנית — ולכן ההתראה, ולא console.log בלבד.
+         */
+        console.error("addOrder finalize failed: ", finalizeError);
+
+        try {
+          const processingStatus = await Status.findOne({ name: "Processing" });
+          if (processingStatus) {
+            await Order.updateOne(
+              { _id: order._id },
+              { $set: { status: processingStatus._id } }
+            );
+          }
+        } catch (statusError) {
+          console.error("addOrder finalize fallback status failed: ", statusError);
+        }
+
+        sendEmailSilent({
+          from: `"${process.env.COMPANY_NAME || "Store"}" <${process.env.EMAIL_USER}>`,
+          to: ADD_ORDER_ERROR_ALERT_EMAIL,
+          subject: `[addOrder] סגירת הזמנה ${order.invoice} נכשלה — נדרשת בדיקה ידנית`,
+          text: [
+            `זמן: ${new Date().toISOString()}`,
+            `הזמנה: ${order.invoice} (${order._id})`,
+            `לקוח: ${req.user?.email || req.body?.email || ""}`,
+            "",
+            "ההזמנה נשמרה והועברה ל-Processing, אבל שלבי הסגירה נכשלו.",
+            "יש לוודא ידנית: הורדת מלאי, סימון קופון/מבצעים, תעודת משלוח, מייל ללקוח.",
+            "",
+            `הודעה: ${finalizeError.message}`,
+            "",
+            "Stack:",
+            finalizeError.stack || "(אין stack)",
+          ].join("\n"),
+        }).catch((mailErr) =>
+          console.log("addOrder finalize alert email failed: ", mailErr.message)
+        );
+      }
+
+      return res.status(201).send({
+        orderId: order._id,
+        orderToken,
+        paymentDisabled: true,
+      });
+    }
     
     const cardcomObj = {
       TerminalNumber: process.env.CARDCOM_TERMINAL_NUMBER,
