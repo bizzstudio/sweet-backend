@@ -476,7 +476,11 @@ section("רגרסיה: כלל השתיקה מוחק בדיוק את מה שהה�
 //
 // בכל השלושה ההיסטוריה החזירה "אין אות" — לא כי לא ידעה, אלא כי המוצר סולק
 // לפני שהגיעה אליו. לכן היא עובדת מול keptBeforeSilentDrops.
-const { applyQualifiers, extractQualifiers } = require("../lib/order-ingestion/qualifiers");
+const {
+  applyQualifiers,
+  extractQualifiers,
+  withoutPlainWords,
+} = require("../lib/order-ingestion/qualifiers");
 
 const SPOONS = [
   { _id: "s1", sku: "1308", title: { he: "כפיות ח.פעמי שקוף קשיח 50 יח" } },
@@ -665,6 +669,52 @@ check('"ביצים 30 יחידות" ↔ "30 יח"', anyCovers("ביצים 30 י�
 
 // מפרט שבאמת אינו בקטלוג ממשיך להגיע לאדם — הנרמול אינו ממציא התאמות
 check('"נס קפה צנצנת" — "צנצנת" באמת לא בקטלוג', anyCovers("נס קפה צנצנת"), false);
+
+// ───────────────────────────────────────────────────────────────
+
+section('"רגיל" — בקשה מפורשת לגרסה הבסיסית (04/10/26)');
+
+{
+  // #140225: 683 מול 519 — ההיסטוריה לא הכריעה כי שתי הגרסאות בבריכה
+  const P = (id, he) => ({ product: { _id: id, title: { he } }, score: 10 });
+  const milkPool = [
+    P("cafe", "חלב לקפה"),
+    P("goat", "חלב עיזים"),
+    P("plain", "חלב טרי בקרטון 1 ליטר 3% טרה/תנובה"),
+    P("soy", "חלב סוייה טרי מגוון סוגים"),
+    P("lact", "חלב דל לקטוז/נטול לקטוז 1 ליטר"),
+  ];
+  const recent = new Date(Date.now() - 30 * 24 * 3600 * 1000);
+  const milkProfile = {
+    byProduct: new Map([
+      ["plain", { lines: 683, totalQty: 683, lastAt: recent }],
+      ["soy", { lines: 519, totalQty: 519, lastAt: recent }],
+      ["lact", { lines: 189, totalQty: 189, lastAt: recent }],
+    ]),
+    bySku: new Map(),
+  };
+  const plainPool = applyQualifiers(milkPool, extractQualifiers("חלב רגיל")).keptBeforeSilentDrops;
+  check("בלי הסינון — רמז בלבד", pickFromHistory(milkPool, milkProfile).tier, "hint");
+  const decided = pickFromHistory(plainPool, milkProfile);
+  check('"חלב רגיל" — ההיסטוריה מכריעה', decided && `${decided.tier}:${decided.product._id}`, "decisive:plain");
+  // הכיסוי המלא נשאר קפדני — אחרת הבחירה האוטומטית הייתה מכניסה "חלב לקפה"
+  // ללקוח בלי היסטוריה. רק מבחן ההיסטוריה מקבל את השם בלי "רגיל".
+  check('"חלב רגיל" אינו מכוסה ב"חלב לקפה"', coversAllWords("חלב רגיל", milkPool[0].product), false);
+  check('בלי "רגיל" — מכוסה ב"חלב טרי 3%"', coversAllWords(withoutPlainWords("חלב רגיל"), milkPool[2].product), true);
+  check("withoutPlainWords אינו פוגע במילה שמכילה רגיל", withoutPlainWords("חלב רגילות טרי"), "חלב טרי");
+
+  const soyKept = applyQualifiers(
+    [P("s1", "חלב סויה ביו עמיד"), P("s2", "חלב סויה בטעם וניל")],
+    extractQualifiers("חלב סויה רגיל")
+  ).kept.map((k) => k.product._id);
+  check('"חלב סויה רגיל" שומר סויה ופוסל טעם', soyKept.join(","), "s1");
+
+  const catalogPlain = applyQualifiers(
+    [P("n", "גבינה צהובה נועם רגיל/לייט 360"), P("l", "גבינה צהובה לייט 9%")],
+    extractQualifiers("גבינה צהובה רגילה")
+  ).kept.map((k) => k.product._id);
+  check('מוצר שנושא "רגיל" בשמו אינו נפסל', catalogPlain.join(","), "n");
+}
 
 // ───────────────────────────────────────────────────────────────
 

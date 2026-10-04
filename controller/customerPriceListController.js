@@ -904,6 +904,191 @@ const importCustomerPriceList = async (req, res) => {
 };
 
 /* ------------------------------------------------------------------ *
+ * עדכון מחירים בודדים — מיזוג לתוך המחירון הקיים, לא דריסה.
+ *
+ * למה זה קיים: מחיר שהוקלד ידנית בתעודת משלוח היה תקף לתעודה הזו בלבד, ובפעם
+ * הבאה הלקוח קיבל שוב את המחיר הישן. כאן נשמר המחיר החדש למחירון, ומשם הוא
+ * תופס בכל תמחור הבא. שאר השורות במחירון אינן נוגעות.
+ * ------------------------------------------------------------------ */
+
+// מחירים שנשמרים מהמסך — שורות בודדות, לא קובץ
+const MAX_UPSERT_ITEMS = 200;
+
+// ── התאמה מדויקת בלבד, בכוונה ──
+//
+// המחירון מוחלף ומוסר לפי המק"ט כפי שנשלח, ולא לפי הצורה המספרית שלו
+// ("0123" ו-"123"). בקטלוג יש מוצרים כפולים, ושני מוצרים שונים יכולים לשבת
+// על שתי הצורות — הסרת "123" כשמעדכנים את "0123" הייתה מוחקת בשקט מחיר של
+// מוצר אחר. וגם אין בזה צורך: התמחור של התעודות (lib/billing/pricing.js)
+// מחפש התאמה מדויקת, ושאר המסלולים מעדיפים התאמה מדויקת על פני הנפילה.
+
+const upsertCustomerPriceListItems = async (req, res) => {
+  try {
+    const customer = await findCustomer(req.params.customerId);
+    if (!customer) return res.status(404).send({ message: "לקוח לא נמצא" });
+
+    const raw = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (raw.length === 0) {
+      return res.status(400).send({ message: "לא נשלחו מחירים לשמירה" });
+    }
+    if (raw.length > MAX_UPSERT_ITEMS) {
+      return res
+        .status(400)
+        .send({ message: `ניתן לשמור עד ${MAX_UPSERT_ITEMS} מחירים בבקשה אחת` });
+    }
+
+    const { items, invalid } = collectValidRows(raw);
+    if (invalid.length > 0 || items.length === 0) {
+      return res.status(400).send({
+        message: "יש מחירים לא תקינים — מק\"ט חסר או מחיר שאינו חיובי",
+        errors: invalid.slice(0, MAX_SAMPLES),
+      });
+    }
+
+    // השם נלקח מהקטלוג כשלא נשלח, כדי שהשורה תוצג במחירון כמו שורה מיובאת
+    const catalogBySku = await fetchCatalogBySku(items.map((item) => item.sku));
+    const rows = items.map(({ sku, price, name }) => {
+      const title = lookupCatalog(catalogBySku, sku)?.title;
+      const label = name || toText(title?.he || title?.en || title).slice(0, MAX_NAME_LENGTH);
+      return label ? { sku, price, name: label } : { sku, price };
+    });
+    const replaced = rows.map((row) => row.sku);
+
+    // ── כתיבה אחת, אטומית ──
+    //
+    // הסרת הגרסה הישנה והוספת החדשה נעשות באותה פעולה, ולכן אין רגע שבו
+    // המוצר חסר במחירון, ושני עדכונים מקבילים לא דורסים זה את זה. לקוח בלי
+    // מחירון מקבל מחירון חדש עם השורות האלה בלבד.
+    const now = new Date();
+    const merged = {
+      $concatArrays: [
+        {
+          $filter: {
+            input: { $ifNull: ["$items", []] },
+            // ‏$literal: מק"ט שמתחיל ב-"$" היה מתפרש אחרת כנתיב שדה, ושורה
+            // ישנה שלו לא הייתה מוחלפת אלא משוכפלת
+            cond: { $not: [{ $in: ["$$this.sku", { $literal: replaced }] }] },
+          },
+        },
+        { $literal: rows },
+      ],
+    };
+
+    let saved;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        saved = await CustomerPriceList.findOneAndUpdate(
+          { customer: customer._id },
+          [
+            { $set: { items: merged } },
+            {
+              $set: {
+                // ‏importedAt/fileName נשארים של היבוא האחרון — הם מתארים את
+                // הקובץ, ותאריך חדש לצד שם קובץ ישן היה מטעה
+                itemsCount: { $size: "$items" },
+                createdAt: { $ifNull: ["$createdAt", now] },
+                updatedAt: now,
+              },
+            },
+          ],
+          { new: true, upsert: true, timestamps: false }
+        )
+          .select("itemsCount")
+          .lean();
+        break;
+      } catch (err) {
+        // אותו מרוץ יצירה כמו ביבוא המלא
+        if (err.code !== 11000 || attempt === 2) throw err;
+      }
+    }
+
+    res.send({
+      message:
+        rows.length === 1
+          ? "המחיר נשמר במחירון הלקוח"
+          : `${rows.length} מחירים נשמרו במחירון הלקוח`,
+      customer: String(customer._id),
+      saved: rows.length,
+      itemsCount: saved?.itemsCount || rows.length,
+    });
+  } catch (err) {
+    console.log("upsertCustomerPriceListItems error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/* ------------------------------------------------------------------ *
+ * הסרת מוצרים בודדים מהמחירון — המוצר חוזר למחיר הקטלוג.
+ *
+ * חלק מעריכת המחירון מהמסך, בלי אקסל (בקשת הלקוחה, 04/10/2026). אותה
+ * כתיבה אטומית כמו בעדכון: הסינון וספירת השורות באותה פעולה.
+ *
+ * מחירון שהתרוקן נמחק. מסמך עם 0 שורות היה מוצג בכרטיס כ"יש מחירון",
+ * בזמן שבפועל הלקוח משלם מחירי קטלוג על הכל.
+ * ------------------------------------------------------------------ */
+const removeCustomerPriceListItems = async (req, res) => {
+  try {
+    const customer = await findCustomer(req.params.customerId);
+    if (!customer) return res.status(404).send({ message: "לקוח לא נמצא" });
+
+    const raw = Array.isArray(req.body?.skus) ? req.body.skus : [];
+    const skus = [...new Set(raw.map(toText).filter(Boolean))];
+    if (skus.length === 0) {
+      return res.status(400).send({ message: 'לא נשלחו מק"טים להסרה' });
+    }
+    if (skus.length > MAX_UPSERT_ITEMS) {
+      return res
+        .status(400)
+        .send({ message: `ניתן להסיר עד ${MAX_UPSERT_ITEMS} מוצרים בבקשה אחת` });
+    }
+
+    // התאמה מדויקת — ראה ההסבר מעל upsertCustomerPriceListItems
+    const removed = skus;
+    const saved = await CustomerPriceList.findOneAndUpdate(
+      { customer: customer._id },
+      [
+        {
+          $set: {
+            items: {
+              $filter: {
+                input: { $ifNull: ["$items", []] },
+                // ‏$literal: מק"ט שמתחיל ב-"$" היה מתפרש כנתיב שדה
+                cond: { $not: [{ $in: ["$$this.sku", { $literal: removed }] }] },
+              },
+            },
+          },
+        },
+        { $set: { itemsCount: { $size: "$items" }, updatedAt: new Date() } },
+      ],
+      { new: true, timestamps: false }
+    )
+      .select("itemsCount")
+      .lean();
+
+    if (!saved) return res.status(404).send({ message: "ללקוח אין מחירון" });
+
+    if (saved.itemsCount === 0) {
+      // התנאי על itemsCount מגן מפני עדכון מקביל שהוסיף שורה בינתיים
+      await CustomerPriceList.deleteOne({ _id: saved._id, itemsCount: 0 });
+    }
+
+    res.send({
+      message:
+        saved.itemsCount === 0
+          ? "המחירון התרוקן והוסר — הלקוח משלם מחירי קטלוג"
+          : skus.length === 1
+            ? "המוצר הוסר מהמחירון — יימכר ללקוח במחיר הקטלוג"
+            : `${skus.length} מוצרים הוסרו מהמחירון`,
+      customer: String(customer._id),
+      itemsCount: saved.itemsCount,
+    });
+  } catch (err) {
+    console.log("removeCustomerPriceListItems error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/* ------------------------------------------------------------------ *
  * הסרת המחירון — הלקוח חוזר למחירי הקטלוג.
  * ------------------------------------------------------------------ */
 const deleteCustomerPriceList = async (req, res) => {
@@ -932,6 +1117,8 @@ module.exports = {
   getCustomerPriceList,
   checkImportCustomerPriceList,
   importCustomerPriceList,
+  upsertCustomerPriceListItems,
+  removeCustomerPriceListItems,
   deleteCustomerPriceList,
   checkImportBulkPriceLists,
   importBulkPriceLists,

@@ -818,6 +818,129 @@ const importCustomers = async (req, res) => {
   }
 };
 
+// הוספת לקוח ידנית מהפאנל — לקוח שנפתח בהנהח"ש ועדיין לא הגיע ביבוא.
+//
+// הלקוח נוצר עם אובייקט erp ולא כלקוח חנות: כך כרטיס הלקוח מציג את פאנל
+// ההנהח"ש, ויבוא האקסל הבא מוצא אותו לפי מספר הלקוח ומעדכן אותו במקום ליצור
+// כפיל. מסיבה זו מספר לקוח שכבר קיים נדחה — שני כרטיסים עם אותו מספר היו
+// מפצלים את ההזמנות, המחירון והחיוב בין שני לקוחות.
+//
+// מספר הלקוח הוא חובה ולא "מומלץ": הוא המפתח של הכרטיס ב-iCount
+// (custom_client_id), ו-syncCustomer זורק בלעדיו. לקוח בלי מספר היה נשמר
+// בהצלחה ונכשל רק בהפקת החשבונית הראשונה, בסוף החודש.
+
+// שדות הטופס חייבים להיות מחרוזת (או מספר, כמו מספר לקוח). גוף JSON יכול
+// להביא אובייקט או מערך, ו-String() היה הופך אותו ל-"[object Object]"
+const formText = (value) =>
+  typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
+
+const createCustomerByAdmin = async (req, res) => {
+  try {
+    if (!(await isCustomerManager(req?.user))) {
+      return res.status(403).send({ message: "אין לך הרשאה להוסיף לקוחות." });
+    }
+
+    const body = req.body || {};
+    const name = formText(body.name);
+    const customerNumber = formText(body.customerNumber);
+    const email = formText(body.email).toLowerCase();
+    const contactEmail = formText(body.contactEmail).toLowerCase();
+    const rawPhone = formText(body.phone);
+    const password = formText(body.password);
+
+    if (!name) {
+      return res.status(400).send({ message: "יש להזין שם לקוח." });
+    }
+    if (!customerNumber) {
+      return res
+        .status(400)
+        .send({ message: 'יש להזין מספר לקוח (כמו בהנהח"ש).' });
+    }
+    if (email && !isDeliverableEmail(email)) {
+      return res.status(400).send({ message: `"${email}" אינה כתובת מייל תקינה.` });
+    }
+    if (contactEmail && !isDeliverableEmail(contactEmail)) {
+      return res
+        .status(400)
+        .send({ message: `"${contactEmail}" אינה כתובת מייל תקינה.` });
+    }
+    if (password && password.length < MIN_PASSWORD_LENGTH) {
+      return res.status(400).send({
+        message: `הסיסמה חייבת להכיל לפחות ${MIN_PASSWORD_LENGTH} תווים.`,
+      });
+    }
+
+    if (await Customer.exists({ "erp.customerNumber": customerNumber })) {
+      return res.status(409).send({
+        message: `מספר לקוח ${customerNumber} כבר קיים במערכת.`,
+      });
+    }
+
+    // אותו נרמול כמו בעריכת לקוח: נייד שנשמר עם מקפים אינו נמצא בכניסה ב-SMS
+    const phone = isValidIsraeliMobile(rawPhone) ? canonicalPhone(rawPhone) : rawPhone;
+
+    // לקוח עם סיסמה נחשב רשום, וכניסה בטלפון מזהה לקוח רשום לפי המספר בלבד —
+    // שני רשומים עם אותו נייד שוברים אותה
+    if (password && (await phoneTakenByRegisteredCustomer(phone))) {
+      return res.status(409).send({ message: PHONE_TAKEN_MESSAGE });
+    }
+
+    const customer = new Customer({
+      name,
+      lastName: "",
+      // בלי מייל: אותו מזהה פנימי שהיבוא נותן, כדי שהיבוא הבא יזהה אותו
+      email: email || placeholderEmailFor(customerNumber),
+      ...(contactEmail && contactEmail !== email ? { contactEmail } : {}),
+      phone,
+      address: buildCustomerAddress({
+        address: formText(body.address),
+        city: formText(body.city),
+        postalCode: formText(body.postalCode),
+      }),
+      isRegistered: false,
+      inBlackList: false,
+      isCashier: false,
+      erp: {
+        customerNumber,
+        contactPerson: formText(body.contactPerson),
+        idNumber: formText(body.idNumber),
+        mobile: rawPhone,
+        landline: formText(body.landline),
+        notes: formText(body.notes),
+        active: true,
+        openDate: new Date(),
+      },
+    });
+
+    if (password) {
+      setCustomerPassword(customer, password);
+      customer.isRegistered = true;
+    }
+
+    await customer.save();
+
+    res.status(201).send({
+      _id: customer._id,
+      name: customer.name,
+      email: customer.email,
+      message: "הלקוח נוסף בהצלחה",
+    });
+  } catch (err) {
+    console.log("createCustomerByAdmin error: ", err);
+    // email הוא השדה הייחודי היחיד. כשלא הוזן מייל, ההתנגשות היא על המזהה
+    // הפנימי — כלומר כבר יש כרטיס שנוצר בעבר עם מספר הלקוח הזה ומספרו שונה
+    // מאז. "המייל תפוס" היה מבלבל כשלא הוקלד מייל בכלל
+    if (err?.code === 11000) {
+      return res.status(409).send({
+        message: formText(req.body?.email)
+          ? "כתובת האימייל הזו כבר משויכת ללקוח אחר במערכת."
+          : `כבר קיים כרטיס שנוצר בעבר עם מספר לקוח ${formText(req.body?.customerNumber)}. יש לחפש אותו ברשימת הלקוחות.`,
+      });
+    }
+    res.status(500).send({ message: err.message });
+  }
+};
+
 const loginCustomer = async (req, res) => {
   try {
     // האימייל נשמר במודל באותיות קטנות (lowercase: true), ולכן חיפוש לפי מה
@@ -1895,6 +2018,7 @@ module.exports = {
   registerCustomer,
   importCustomers,
   checkImportCustomers,
+  createCustomerByAdmin,
   signUpWithProvider,
   verifyEmailAddress,
   forgetPassword,

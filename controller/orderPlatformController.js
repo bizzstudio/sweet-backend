@@ -25,8 +25,13 @@ const { reprocess } = require("../lib/order-ingestion");
 const { loginToPlatform } = require("../lib/link-follower/login");
 const { followOrderLink } = require("../lib/link-follower");
 
-const adminDisplayName = (user) =>
-  [user?.name, user?.email].filter(Boolean).join(" ") || "אדמין";
+// ‏Admin.name הוא אובייקט ({ he, en }) ולא מחרוזת — צירופו כמו שהוא נשמר
+// כ-"[object Object]". אותה פונקציה כמו ב-incomingOrderController.
+const adminDisplayName = (user) => {
+  const name = user?.name;
+  if (typeof name === "string" && name) return name;
+  return name?.he || name?.en || user?.email || "אדמין";
+};
 
 const asObjectId = (value, res) => {
   if (!mongoose.Types.ObjectId.isValid(value)) {

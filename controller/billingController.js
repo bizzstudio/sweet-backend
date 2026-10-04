@@ -30,6 +30,7 @@ const { ping } = require("../lib/icount/client");
 const { isDemoMode, modeLabel } = require("../lib/icount/mode");
 const demo = require("../lib/billing/demo");
 const ledger = require("../lib/billing/ledger");
+const { withContactPhone } = require("../lib/billing/contactPhone");
 const PrintJob = require("../models/PrintJob");
 const { queueDeliveryNote, isEnabled: printingEnabled } = require("../lib/printing/printJobs");
 
@@ -145,10 +146,17 @@ const createDeliveryNote = async (req, res) => {
  *
  * זו הנקודה שבה המשקל שנשקל בפועל נכנס למערכת. החשבונית החודשית נבנית
  * מהתעודות, ולכן מכאן והלאה החיוב הוא על מה שנשקל ולא על מה שהוזמן.
+ *
+ * billNow:true — "חשבונית חדשה" ממסך החשבוניות. חשבונית במערכת הזו נבנית
+ * תמיד מתעודה, ולכן גם חשבונית ישירה ללקוח היא תעודה + חיוב מיידי שלה,
+ * דרך אותו billNotesNow ואותה הגנת claim מחיוב כפול. שליחה חוזרת של אותו
+ * טופס (אותו idempotencyKey) אחרי כשל בחיוב מחייבת את התעודה הקיימת ולא
+ * יוצרת שנייה — זה הניסיון החוזר.
  */
 const createManualDeliveryNote = async (req, res) => {
+  let createdNote = null;
   try {
-    const { customer, order, items, manualReference, issuedAt, notes, shippingCost, discount, idempotencyKey } =
+    const { customer, order, items, manualReference, issuedAt, notes, shippingCost, discount, idempotencyKey, billNow } =
       req.body || {};
 
     if (Array.isArray(items) && items.length > MAX_ITEMS_PER_REQUEST) {
@@ -176,17 +184,51 @@ const createManualDeliveryNote = async (req, res) => {
       issuedBy: adminName(req),
     });
 
+    createdNote = note;
+
     // אותו מסלול כמו בתעודה האוטומטית: לקוח perDelivery מקבל חשבונית מיד
     let billed = null;
     if (created) {
       billed = await monthlyBilling.billNoteImmediately(note._id);
     }
 
+    if (billNow === true && !billed?.invoices?.length) {
+      // התעודה עשויה להיות כבר מחויבת אם זו שליחה חוזרת של טופס שהצליח
+      const current = ledger.normalize(await DeliveryNote.findById(note._id).lean());
+      if (current?.billing?.status === "open") {
+        billed = await monthlyBilling.billNotesNow({
+          customerId: String(note.customer),
+          noteIds: [String(note._id)],
+          // חשבונית ישירה ללקוח — המסמך היחיד שהוא מקבל, ולכן מפורט
+          detailed: true,
+        });
+      } else {
+        // לא "נוצרה" סתם: המשתמשת ביקשה חשבונית, והתשובה חייבת לומר שאין
+        // אחת מהבקשה הזו. "billing" = סגירת חודש תפסה אותה באותו רגע
+        const status = current?.billing?.status;
+        const docNum = current?.billing?.icountDocNum;
+        return res.status(status === "billed" ? 200 : 409).send({
+          message:
+            status === "billed"
+              ? `תעודה ${note.number} כבר חויבה${docNum ? ` בחשבונית ${docNum}` : ""}`
+              : status === "billing"
+                ? `תעודה ${note.number} נמצאת כרגע בחיוב של תהליך אחר — החשבונית תופיע ברשימה בעוד רגע`
+                : `תעודה ${note.number} לא חויבה (מצב: ${status || "לא ידוע"})`,
+          created,
+          note: current,
+          quality,
+          invoices: [],
+        });
+      }
+    }
+
     const invoiceNums = (billed?.invoices || []).map((i) => i.docNum).join(", ");
 
-    res.status(created ? 201 : 200).send({
+    res.status(created || invoiceNums ? 201 : 200).send({
       message: !created
-        ? `תעודת משלוח ${note.number} כבר הופקה`
+        ? invoiceNums
+          ? `חשבונית ${invoiceNums} הופקה על תעודה ${note.number}`
+          : `תעודת משלוח ${note.number} כבר הופקה`
         : invoiceNums
           ? `תעודת משלוח ידנית ${note.number} נוצרה וחשבונית ${invoiceNums} הופקה`
           : `תעודת משלוח ידנית ${note.number} נוצרה`,
@@ -196,7 +238,21 @@ const createManualDeliveryNote = async (req, res) => {
       invoices: billed?.invoices || [],
     });
   } catch (err) {
-    res.status(400).send({ message: err.message });
+    // התעודה נוצרה והחשבונית נכשלה — המסך חייב לדעת שהתעודה קיימת, כמו
+    // ב-convertQuote, אחרת לחיצה נוספת מפיקה תעודה שנייה. לקוח עם פיצול
+    // לפי קטגוריה עלול לצאת עם חלק מהחשבוניות כבר ב-iCount — חובה לומר
+    const partial = (err.partialInvoices || []).map((i) => i.docNum).filter(Boolean);
+    const billingFailed = createdNote && req.body?.billNow === true;
+    res.status(400).send({
+      message: billingFailed
+        ? `תעודת משלוח ${createdNote.number} נוצרה, אבל ` +
+          (partial.length
+            ? `רק חלק מהחשבוניות הופקו (${partial.join(", ")}): ${err.message}`
+            : `החשבונית לא הופקה: ${err.message}`)
+        : err.message,
+      note: billingFailed ? createdNote : undefined,
+      invoices: err.partialInvoices || [],
+    });
   }
 };
 
@@ -251,7 +307,10 @@ const getDeliveryNotes = async (req, res) => {
 
 const getDeliveryNote = async (req, res) => {
   try {
-    const note = ledger.normalize(await DeliveryNote.findById(req.params.id).lean());
+    // תעודה מלפני 04/10/2026 אין בה טלפון איש קשר — משלימים בקריאה בלבד
+    const note = await withContactPhone(
+      ledger.normalize(await DeliveryNote.findById(req.params.id).lean())
+    );
     if (!note) return res.status(404).send({ message: "תעודה לא נמצאה" });
     // totals מחושב בשרת ולא בדפדפן, כדי שלא יהיו שני חישובי מע"מ שיכולים
     // להיפרד. המסמך המודפס רק מציג את מה שמגיע מכאן.
@@ -415,6 +474,9 @@ const billDeliveryNote = async (req, res) => {
     const result = await monthlyBilling.billNotesNow({
       customerId: String(note.customer),
       noteIds: [String(note._id)],
+      // חשבונית על הזמנה בודדת מפרטת תמיד את המוצרים, גם אצל לקוח
+      // שהחשבונית החודשית שלו מרוכזת (בקשת הלקוחה, 04/10/2026)
+      detailed: true,
       emailDocument:
         typeof req.body?.emailDocument === "boolean" ? req.body.emailDocument : undefined,
     });
@@ -977,7 +1039,7 @@ const getQuotes = async (req, res) => {
 
 const getQuote = async (req, res) => {
   try {
-    const quote = await Quote.findById(req.params.id).lean();
+    const quote = await withContactPhone(await Quote.findById(req.params.id).lean());
     if (!quote) return res.status(404).send({ message: "הצעת מחיר לא נמצאה" });
     res.send({ ...quote, totals: calculateVat(quote) });
   } catch (err) {

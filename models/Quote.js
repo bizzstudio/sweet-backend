@@ -46,6 +46,8 @@ const quoteSchema = new mongoose.Schema(
       name: { type: String, required: false },
       customerNumber: { type: String, required: false },
       contactPerson: { type: String, required: false },
+      // טלפון איש הקשר — ראה lib/billing/contactPhone.js
+      contactPhone: { type: String, required: false },
     },
 
     items: {

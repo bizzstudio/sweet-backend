@@ -20,6 +20,7 @@ const {
   deleteCustomer,
   importCustomers,
   checkImportCustomers,
+  createCustomerByAdmin,
   addToBlackListByPhone,
   toggleCustomerCashier,
   validateToken,
@@ -103,6 +104,9 @@ router.post("/import/check", isAdmin, checkImportCustomers);
 
 // יבוא/עדכון לקוחות מאקסל לפי מספר לקוח
 router.post("/import", isAdmin, importCustomers);
+
+// הוספת לקוח ידנית מהפאנל. חייב להירשם לפני "/:id"
+router.post("/create", isAdmin, createCustomerByAdmin);
 
 // get all user
 router.get("/", isAdmin, getAllCustomers);

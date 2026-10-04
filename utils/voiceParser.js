@@ -204,13 +204,16 @@ function normalizeHebrewWord(word) {
 };
 
 // פונקציה פשוטה להסרת גרשים
+//
+// ‏׳ (גרש עברי, U+05F3) ו-’ (גרש מעוקל, U+2019) הם מה שמקלדת האייפון מכניסה
+// כשמקלידים "קוטג׳". הם לא הוסרו כאן, והרגקס דרש אותם כתו מילולי — כלומר
+// "קוטג׳" חיפש מוצר שבשמו יש בדיוק ׳, ובקטלוג כתוב "קוטג'". נמדד בהזמנות
+// #140221 ו-#140223 (04/10/26): "קוטג׳" ו-"קוטג׳ 5%" חזרו "לא נמצא מוצר".
+const APOSTROPHE_CHARS = "'`ʼʻ׳’‘";
+const APOSTROPHE_RE = new RegExp(`[${APOSTROPHE_CHARS}]`, 'g');
+
 function removeApostrophes(text) {
-    return text
-        .replace(/'/g, '') // הסרת גרש יחיד רגיל
-        .replace(/'/g, '') // הסרת גרש מעוקל
-        .replace(/`/g, '') // הסרת גרש הפוך
-        .replace(/ʼ/g, '') // הסרת גרש יוניקוד
-        .replace(/ʻ/g, ''); // הסרת גרש יוניקוד נוסף
+    return text.replace(APOSTROPHE_RE, '');
 };
 
 // בריחה מתווים בעלי משמעות ב-regex.
@@ -230,7 +233,7 @@ function createApostropheIgnoringRegex(word) {
     const regexPattern = cleanWord
         .split('')
         .map(escapeRegexChar)
-        .join('[\'\'`ʼʻ]?'); // גרש אופציונלי בין כל תו
+        .join(`[${APOSTROPHE_CHARS}]?`); // גרש אופציונלי בין כל תו
 
     return new RegExp(regexPattern, 'i');
 };

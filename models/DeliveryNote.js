@@ -122,6 +122,8 @@ const deliveryNoteSchema = new mongoose.Schema(
       address: { type: String, required: false },
       city: { type: String, required: false },
       contactPerson: { type: String, required: false },
+      // טלפון איש הקשר — ראה lib/billing/contactPhone.js
+      contactPhone: { type: String, required: false },
     },
 
     items: {
@@ -206,6 +208,9 @@ const deliveryNoteSchema = new mongoose.Schema(
       // האוטומטית אף אחד לא רואה את התשובה, ו"האם הלקוח קיבל את החשבונית"
       // היא שאלה שנשאלת חודשים אחרי.
       icountDocEmailedTo: { type: String, default: null },
+      // האם שורות החשבונית רוכזו לשורה לקטגוריה (true) או פורטו (false).
+      // הזיכוי נבנה לפי זה ולא לפי הגדרת הלקוח של היום
+      icountDocSummarized: { type: Boolean, required: false },
       billedAt: { type: Date, required: false },
       // החודש שאליו שויכה התעודה, בפורמט YYYY-MM. נקבע לפי issuedAt, אבל
       // נשמר בנפרד כדי שאפשר יהיה לשייך ידנית תעודה מאחרת לחודש הקודם.
@@ -277,6 +282,7 @@ const deliveryNoteSchema = new mongoose.Schema(
         icountDocType: { type: String, required: false },
         icountDocUrl: { type: String, required: false },
         icountDocEmailedTo: { type: String, default: null },
+        icountDocSummarized: { type: Boolean, required: false },
         billedAt: { type: Date, required: false },
         receiptDocNum: { type: String, required: false },
         receiptDocUrl: { type: String, required: false },

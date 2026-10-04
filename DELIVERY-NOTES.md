@@ -168,7 +168,7 @@ node scripts/setup-manual-delivery-notes.js          # ביצוע
 ```ini
 PRINT_AGENT_TOKEN=        # חובה. בלעדיו מסלולי ההדפסה מחזירים 503
 PRINTING_ENABLED=true     # false = לא נכנסות משימות לתור
-DELIVERY_NOTE_COPIES=1    # 1-3. שניים = "מקור" + "העתק", כל אחד בעמוד נפרד
+DELIVERY_NOTE_COPIES=2    # 2-3 (ברירת מחדל 2). שניים = "מקור" + "העתק", כל אחד בעמוד נפרד
 ```
 
 **מה קורה כשהתעודה משתנה או מבוטלת:**

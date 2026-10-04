@@ -18,6 +18,8 @@ const {
   getCustomerPriceList,
   checkImportCustomerPriceList,
   importCustomerPriceList,
+  upsertCustomerPriceListItems,
+  removeCustomerPriceListItems,
   deleteCustomerPriceList,
   checkImportBulkPriceLists,
   importBulkPriceLists,
@@ -59,6 +61,13 @@ router.get("/:customerId", isAdmin, getCustomerPriceList);
 
 // יבוא מחירון (דריסה מלאה של הקודם)
 router.post("/:customerId", isAdmin, isPriceListManager, importCustomerPriceList);
+
+// עדכון מחירים בודדים (מיזוג — שאר המחירון נשאר כמו שהוא)
+router.put("/:customerId/items", isAdmin, isPriceListManager, upsertCustomerPriceListItems);
+
+// הסרת מוצרים בודדים — הם חוזרים למחיר הקטלוג. POST ולא DELETE עם גוף,
+// כי גוף בבקשת DELETE נזרק בדרך אצל חלק מהפרוקסים
+router.post("/:customerId/items/remove", isAdmin, isPriceListManager, removeCustomerPriceListItems);
 
 // הסרת המחירון — הלקוח חוזר למחירי הקטלוג
 router.delete("/:customerId", isAdmin, isPriceListManager, deleteCustomerPriceList);
