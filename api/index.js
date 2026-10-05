@@ -33,6 +33,7 @@ const orderPlatformRoutes = require("../routes/orderPlatformRoutes");
 const blogRoutes = require("../routes/blogRoutes");
 const lotteryRoutes = require("../routes/lotteryRoutes");
 const billingRoutes = require("../routes/billingRoutes");
+const customerDocumentRoutes = require("../routes/customerDocumentRoutes");
 const printJobRoutes = require("../routes/printJobRoutes");
 const monthEndCron = require("../lib/billing/monthEndCron");
 const { getActiveLottery } = require("../controller/lotteryController");
@@ -124,6 +125,9 @@ app.use("/api/blog/", blogRoutes);
 // חיוב: תעודות משלוח, סגירת חודש והפקת מסמכים ב-iCount. ההגנה היא isAdmin
 // בתוך הראוטר עצמו ולא כאן, כדי שכל מסלול יהיה מסומן במפורש.
 app.use("/api/billing/", billingRoutes);
+// "המסמכים שלי" באזור האישי בחנות: המסמכים של הלקוח המחובר בלבד. נתיב
+// נפרד מ-/api/billing כדי שהכלל שם ("הכל isAdmin") יישאר בלי יוצא מן הכלל.
+app.use("/api/my-documents/", customerDocumentRoutes);
 // תור ההדפסה. הלקוח היחיד שלו הוא print-agent שרץ על המחשב שליד המדפסת,
 // והאימות הוא PRINT_AGENT_TOKEN בתוך הראוטר — לא isAdmin, כי לסוכן אין
 // משתמש ואין התחברות.
