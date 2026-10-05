@@ -13,7 +13,7 @@ const mongoose = require("mongoose");
 const CustomerPriceList = require("../models/CustomerPriceList");
 const Customer = require("../models/Customer");
 const Product = require("../models/Product");
-const { normalizeSku, numericSkuKey } = require("../utils/customerPriceList");
+const { normalizeSku, numericSkuKey, getCustomerPriceMap } = require("../utils/customerPriceList");
 
 // תקרה לשורות בבקשה אחת. המחירון נשלח בבקשה אחת בכוונה — הדריסה חייבת להיות
 // אטומית, ומחירון מפוצל לאצוות היה משאיר את הלקוח עם חצי מחירון אם אצווה נכשלה.
@@ -714,6 +714,27 @@ const getCustomerPriceList = async (req, res) => {
 };
 
 /* ------------------------------------------------------------------ *
+ * מפתחות המק"ט שבמחירון הלקוח — בלי מחירים ובלי נתוני קטלוג.
+ *
+ * משמש את בורר המוצרים בתעודת משלוח, שמציג רק את מה שבמחירון של הלקוח.
+ * המפתחות נבנים ב-getCustomerPriceMap, אותה מפה שמתמחרת את התעודה, ולכן
+ * "מופיע בבורר" ו"מתומחר מהמחירון" הם תמיד אותה קבוצה — כולל הנפילה למק"ט
+ * המספרי, וכולל השמטת שורות בלי מחיר חיובי.
+ * ------------------------------------------------------------------ */
+const getCustomerPriceListSkus = async (req, res) => {
+  try {
+    const customer = await findCustomer(req.params.customerId);
+    if (!customer) return res.status(404).send({ message: "לקוח לא נמצא" });
+
+    const priceMap = await getCustomerPriceMap(customer._id);
+    res.send({ customer: String(customer._id), skus: priceMap ? [...priceMap.keys()] : [] });
+  } catch (err) {
+    console.log("getCustomerPriceListSkus error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/* ------------------------------------------------------------------ *
  * בדיקה מקדימה לפני היבוא: מה יתפוס, מה לא קיים בקטלוג, ואיפה השם בקובץ
  * אינו תואם לשם בקטלוג.
  *
@@ -1115,6 +1136,7 @@ const deleteCustomerPriceList = async (req, res) => {
 module.exports = {
   getPriceListSummary,
   getCustomerPriceList,
+  getCustomerPriceListSkus,
   checkImportCustomerPriceList,
   importCustomerPriceList,
   upsertCustomerPriceListItems,

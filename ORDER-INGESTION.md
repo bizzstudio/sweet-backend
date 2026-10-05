@@ -1746,6 +1746,7 @@ npm run ingest:test -- --file ./examples/order1.txt --real   # יוצר הזמנ
 |---|---|---|
 | `GET /api/customer-price-list` | אדמין | סיכום: למי יש מחירון וכמה שורות (בלי השורות עצמן) |
 | `GET /api/customer-price-list/:customerId` | אדמין | המחירון של לקוח מול הקטלוג. `?search=`, `?limit=` |
+| `GET /api/customer-price-list/:customerId/skus` | אדמין | מפתחות המק"ט שבמחירון בלבד (`{skus}`) — יחד עם היסטוריית הרכישות הם מסננים את בורר המוצרים בתעודת משלוח |
 | `POST /api/customer-price-list/:customerId/check` | מנהל לקוחות | בדיקה מקדימה: מה יתפוס, מה אינו בקטלוג, אילו שמות אינם תואמים |
 | `POST /api/customer-price-list/:customerId` | מנהל לקוחות | יבוא מחירון — **דורס** את הקודם במלואו |
 | `DELETE /api/customer-price-list/:customerId` | מנהל לקוחות | הסרת המחירון — הלקוח חוזר למחירי הקטלוג |

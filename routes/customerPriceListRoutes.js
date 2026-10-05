@@ -16,6 +16,7 @@ const router = express.Router();
 const {
   getPriceListSummary,
   getCustomerPriceList,
+  getCustomerPriceListSkus,
   checkImportCustomerPriceList,
   importCustomerPriceList,
   upsertCustomerPriceListItems,
@@ -58,6 +59,9 @@ router.post("/:customerId/check", isAdmin, isPriceListManager, checkImportCustom
 
 // המחירון של לקוח מסוים
 router.get("/:customerId", isAdmin, getCustomerPriceList);
+
+// רק מפתחות המק"ט שבמחירון — לסינון בורר המוצרים בתעודת משלוח
+router.get("/:customerId/skus", isAdmin, getCustomerPriceListSkus);
 
 // יבוא מחירון (דריסה מלאה של הקודם)
 router.post("/:customerId", isAdmin, isPriceListManager, importCustomerPriceList);
