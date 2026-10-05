@@ -14,6 +14,8 @@ const deliveryNotes = require("../lib/billing/deliveryNotes");
 const monthlyBilling = require("../lib/billing/monthlyBilling");
 const { reissueInvoice } = require("../lib/billing/reissue");
 const quotes = require("../lib/billing/quotes");
+const CreditNote = require("../models/CreditNote");
+const creditNotes = require("../lib/billing/creditNotes");
 const { priceItemsForCustomer, priceQuality } = require("../lib/billing/pricing");
 const { listInvoices } = require("../lib/billing/invoices");
 const { listReceipts, isDayString } = require("../lib/billing/receipts");
@@ -1150,6 +1152,192 @@ const convertQuote = async (req, res) => {
   }
 };
 
+// ---------- תעודות זיכוי ----------
+//
+// תעודת משלוח זיכוי (אצלנו) וחשבונית הזיכוי שמופקת ממנה (ב-iCount).
+// הפירוט ב-lib/billing/creditNotes.
+
+/** מה שנשלח מהטופס, במבנה ש-creditNotes מצפה לו. משותף לתצוגה המקדימה ולהפקה. */
+const creditInput = (body = {}) => ({
+  customerId: body.customer,
+  items: body.items,
+  discount: Number(body.discount) || 0,
+  // רק false מפורש מכבה את הנחת הלקוח; שדה חסר נשאר ברירת המחדל
+  applyCustomerDiscount: body.applyCustomerDiscount !== false,
+});
+
+const creditItemsError = (items) => {
+  if (!Array.isArray(items) || !items.length) return "חסרות שורות לזיכוי";
+  if (items.length > MAX_ITEMS_PER_REQUEST) {
+    return `יותר מדי שורות בזיכוי (${items.length}). המקסימום הוא ${MAX_ITEMS_PER_REQUEST}`;
+  }
+  return null;
+};
+
+const sendCreditNote = (note) => ({
+  ...ledger.normalize(note),
+  totals: calculateVat(note),
+});
+
+const previewCreditNote = async (req, res) => {
+  try {
+    const invalid = creditItemsError(req.body?.items);
+    if (invalid) return res.status(400).send({ message: invalid });
+
+    res.send(await creditNotes.preview(creditInput(req.body)));
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
+/**
+ * הפקת תעודת משלוח זיכוי, ואם התבקש (issueInvoice) — גם חשבונית זיכוי מיד.
+ *
+ * כשהתעודה נשמרה והחשבונית נכשלה מוחזר 201 עם invoiceError ולא שגיאה:
+ * התעודה קיימת, והמסך חייב לדעת זאת — אחרת מי שלחץ ימלא את הטופס שוב
+ * ויקבל שתי תעודות על אותה סחורה.
+ */
+const createCreditNote = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const invalid = creditItemsError(body.items);
+    if (invalid) return res.status(400).send({ message: invalid });
+
+    const { note, created } = await creditNotes.create({
+      ...creditInput(body),
+      reason: body.reason,
+      notes: body.notes,
+      originalDocNum: body.originalDocNum,
+      issuedBy: adminName(req),
+      idempotencyKey: body.idempotencyKey,
+    });
+
+    // שליחה חוזרת של טופס שכבר הפיק הכל (לחיצה כפולה, ניסיון חוזר אחרי
+    // תקלת רשת): מחזירים את מה שכבר קיים, ולא שגיאת "כבר הופקה"
+    const existing = created ? null : ledger.normalize(note).billing;
+    if (body.issueInvoice && existing?.status === "billed") {
+      return res.send({
+        message: `חשבונית זיכוי ${existing.creditDocNum} כבר הופקה מהטופס הזה (תעודת זיכוי ${note.number})`,
+        note: sendCreditNote(note),
+        creditDocNum: existing.creditDocNum,
+        url: existing.creditDocUrl,
+        emailedTo: existing.creditDocEmailedTo || null,
+      });
+    }
+
+    if (!body.issueInvoice) {
+      return res.status(created ? 201 : 200).send({
+        message: created
+          ? `תעודת משלוח זיכוי ${note.number} הופקה`
+          : `תעודת משלוח זיכוי ${note.number} כבר הופקה מהטופס הזה`,
+        note: sendCreditNote(note),
+      });
+    }
+
+    try {
+      const issued = await creditNotes.issueInvoice(note._id, {
+        emailDocument:
+          typeof body.emailDocument === "boolean" ? body.emailDocument : undefined,
+      });
+      res.status(201).send({
+        message: `חשבונית זיכוי ${issued.creditDocNum} הופקה (תעודת זיכוי ${note.number})`,
+        note: sendCreditNote(issued.note),
+        creditDocNum: issued.creditDocNum,
+        url: issued.url,
+        emailedTo: issued.emailedTo,
+      });
+    } catch (err) {
+      const fresh = await CreditNote.findById(note._id).lean().catch(() => null);
+      res.status(201).send({
+        message: `תעודת זיכוי ${note.number} נשמרה, אך ${err.message}`,
+        invoiceError: err.message,
+        note: sendCreditNote(fresh || note),
+      });
+    }
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
+const getCreditNotes = async (req, res) => {
+  try {
+    const { status } = req.query;
+    const { page, limit, skip } = safePaging(req.query);
+
+    // מחרוזת בלבד: ?customer[$ne]=x מגיע מ-express כאובייקט, ואסור שייכנס
+    // לשאילתה כמו שהוא
+    const customer = typeof req.query.customer === "string" ? req.query.customer : "";
+    if (req.query.customer && !isValidId(customer)) {
+      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
+    }
+
+    const query = {};
+    if (customer) query.customer = customer;
+    // "open" ו-"cancelled" נקבעים לפי הרישום האמיתי גם בדמו, כמו בתעודות
+    // המשלוח; "billed" הוא מצב של הכיס הפעיל
+    if (status === "open") Object.assign(query, ledger.openQuery());
+    else if (status === "cancelled") query["billing.status"] = "cancelled";
+    else if (status === "billed") query[ledger.f("status")] = "billed";
+
+    const [list, total] = await Promise.all([
+      CreditNote.find(query).sort({ number: -1 }).skip(skip).limit(limit).lean(),
+      CreditNote.countDocuments(query),
+    ]);
+
+    res.send({ creditNotes: list.map(sendCreditNote), total, page, limit });
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
+const getCreditNote = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה תעודת זיכוי לא תקין" });
+    }
+    const note = await CreditNote.findById(req.params.id).lean();
+    if (!note) return res.status(404).send({ message: "תעודת הזיכוי לא נמצאה" });
+    res.send(sendCreditNote(note));
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/** הפקת חשבונית זיכוי ב-iCount מתעודת זיכוי פתוחה. */
+const issueCreditNoteInvoice = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה תעודת זיכוי לא תקין" });
+    }
+    const issued = await creditNotes.issueInvoice(req.params.id, {
+      originalDocNum: req.body?.originalDocNum,
+      emailDocument:
+        typeof req.body?.emailDocument === "boolean" ? req.body.emailDocument : undefined,
+    });
+    res.send({
+      message: `חשבונית זיכוי ${issued.creditDocNum} הופקה מתעודת זיכוי ${issued.note.number}`,
+      note: sendCreditNote(issued.note),
+      creditDocNum: issued.creditDocNum,
+      url: issued.url,
+      emailedTo: issued.emailedTo,
+    });
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
+const cancelCreditNote = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה תעודת זיכוי לא תקין" });
+    }
+    const note = await creditNotes.cancel(req.params.id, req.body?.reason);
+    res.send({ message: `תעודת זיכוי ${note.number} בוטלה`, note: sendCreditNote(note) });
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
 // ---------- כללי ----------
 
 /**
@@ -1590,6 +1778,12 @@ module.exports = {
   rejectQuote,
   duplicateQuote,
   convertQuote,
+  previewCreditNote,
+  createCreditNote,
+  getCreditNotes,
+  getCreditNote,
+  issueCreditNoteInvoice,
+  cancelCreditNote,
   getCustomerOpenInvoices,
   getCustomerDocuments,
   getCustomerPurchaseReport,

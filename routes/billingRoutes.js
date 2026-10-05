@@ -76,6 +76,17 @@ router.patch("/quotes/:id/reject", isAdmin, billingController.rejectQuote);
 router.post("/quotes/:id/duplicate", isAdmin, billingController.duplicateQuote);
 router.post("/quotes/:id/convert", isAdmin, billingController.convertQuote);
 
+// --- תעודות זיכוי ---
+// תעודת משלוח זיכוי נבנית אצלנו; חשבונית הזיכוי מופקת ממנה ב-iCount.
+// preview הוא POST מאותה סיבה כמו price-items — רשימת שורות ארוכה
+router.post("/credit-notes/preview", isAdmin, billingController.previewCreditNote);
+router.get("/credit-notes", isAdmin, billingController.getCreditNotes);
+// issueInvoice:true בגוף הבקשה = תעודה + חשבונית זיכוי מיד
+router.post("/credit-notes", isAdmin, billingController.createCreditNote);
+router.get("/credit-notes/:id", isAdmin, billingController.getCreditNote);
+router.post("/credit-notes/:id/invoice", isAdmin, billingController.issueCreditNoteInvoice);
+router.patch("/credit-notes/:id/cancel", isAdmin, billingController.cancelCreditNote);
+
 // --- כרטיס לקוח ---
 router.get("/customer/:customerId/open-invoices", isAdmin, billingController.getCustomerOpenInvoices);
 // כל המסמכים של הלקוח במקום אחד — לכרטיס הלקוח
