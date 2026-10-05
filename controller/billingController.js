@@ -276,6 +276,8 @@ const getPendingManualItems = async (req, res) => {
 const getDeliveryNotes = async (req, res) => {
   try {
     const { status, month, customer, kind } = req.query;
+    // אורך מוגבל: זה טקסט שמוקלד ביד, ומחרוזת ארוכה רק מכבידה על הסריקה
+    const search = String(req.query.search || "").trim().slice(0, 80);
     const { page, limit, skip } = safePaging(req.query);
 
     const query = {};
@@ -288,6 +290,31 @@ const getDeliveryNotes = async (req, res) => {
     else if (status) query[ledger.f("status")] = status;
     if (month) query["billing.billingMonth"] = month;
     if (customer) query.customer = customer;
+    // חיפוש חופשי לפי שם לקוח או מספר לקוח. השם נבדק גם בתעודה עצמה (כפי
+    // שהודפס) וגם בכרטיס הלקוח — לקוח ששמו שונה מאז חייב להימצא בשני השמות.
+    // בכרטיס השם מפוצל ל-name ו-lastName ובתעודה הוא מחובר, ולכן ההשוואה
+    // לכרטיס נעשית על החיבור — אחרת "משה כהן" לא היה מוצא את משה כהן.
+    if (search) {
+      const pattern = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rx = { $regex: pattern, $options: "i" };
+      const fullName = {
+        $concat: [{ $ifNull: ["$name", ""] }, " ", { $ifNull: ["$lastName", ""] }],
+      };
+      const matched = await Customer.find({
+        $or: [
+          { $expr: { $regexMatch: { input: fullName, regex: pattern, options: "i" } } },
+          { "erp.customerNumber": rx },
+        ],
+      })
+        .select("_id")
+        .limit(500)
+        .lean();
+      query.$or = [
+        { "customerSnapshot.name": rx },
+        { "customerSnapshot.customerNumber": rx },
+        { customer: { $in: matched.map((c) => c._id) } },
+      ];
+    }
     // תעודות ישנות נוצרו לפני שהשדה קיים והן כולן אוטומטיות. סינון על
     // "auto" חייב לכלול גם אותן, אחרת המסך היה נראה ריק
     if (kind === "auto") query.kind = { $ne: "manual" };
@@ -1002,7 +1029,7 @@ const createQuote = async (req, res) => {
     const result = await quotes.create({
       customerId: customer,
       items,
-      validDays: Number(validDays) || 30,
+      validDays: Number(validDays) || undefined,
       discount: Number(discount) || 0,
       notes,
       createdBy: adminName(req),
@@ -1074,7 +1101,7 @@ const duplicateQuote = async (req, res) => {
       return res.status(400).send({ message: "מזהה הצעה לא תקין" });
     }
     const quote = await quotes.duplicate(req.params.id, {
-      validDays: Number(req.body?.validDays) || 30,
+      validDays: Number(req.body?.validDays) || undefined,
       createdBy: adminName(req),
     });
     res.status(201).send({ message: `הצעת מחיר ${quote.number} נוצרה כהעתק`, quote });
