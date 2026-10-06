@@ -33,6 +33,7 @@ const { isDemoMode, modeLabel } = require("../lib/icount/mode");
 const demo = require("../lib/billing/demo");
 const ledger = require("../lib/billing/ledger");
 const { withContactPhone } = require("../lib/billing/contactPhone");
+const { withCustomerAddress } = require("../lib/billing/customerAddress");
 const PrintJob = require("../models/PrintJob");
 const { queueDeliveryNote, isEnabled: printingEnabled } = require("../lib/printing/printJobs");
 
@@ -336,9 +337,12 @@ const getDeliveryNotes = async (req, res) => {
 
 const getDeliveryNote = async (req, res) => {
   try {
-    // תעודה מלפני 04/10/2026 אין בה טלפון איש קשר — משלימים בקריאה בלבד
-    const note = await withContactPhone(
-      ledger.normalize(await DeliveryNote.findById(req.params.id).lean())
+    // תעודה מלפני 04/10/2026 אין בה טלפון איש קשר, ותעודה של לקוח שנפתח
+    // ידנית לפני 06/10/2026 יצאה בלי כתובת — משלימים בקריאה בלבד
+    const note = await withCustomerAddress(
+      await withContactPhone(
+        ledger.normalize(await DeliveryNote.findById(req.params.id).lean())
+      )
     );
     if (!note) return res.status(404).send({ message: "תעודה לא נמצאה" });
     // totals מחושב בשרת ולא בדפדפן, כדי שלא יהיו שני חישובי מע"מ שיכולים
