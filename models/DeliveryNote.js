@@ -211,6 +211,8 @@ const deliveryNoteSchema = new mongoose.Schema(
       // האם שורות החשבונית רוכזו לשורה לקטגוריה (true) או פורטו (false).
       // הזיכוי נבנה לפי זה ולא לפי הגדרת הלקוח של היום
       icountDocSummarized: { type: Boolean, required: false },
+      // האם מוצר שחוזר בכמה תעודות אוחד לשורה אחת (mergeProductLines)
+      icountDocMerged: { type: Boolean, required: false },
       billedAt: { type: Date, required: false },
       // החודש שאליו שויכה התעודה, בפורמט YYYY-MM. נקבע לפי issuedAt, אבל
       // נשמר בנפרד כדי שאפשר יהיה לשייך ידנית תעודה מאחרת לחודש הקודם.
@@ -286,6 +288,7 @@ const deliveryNoteSchema = new mongoose.Schema(
         icountDocUrl: { type: String, required: false },
         icountDocEmailedTo: { type: String, default: null },
         icountDocSummarized: { type: Boolean, required: false },
+        icountDocMerged: { type: Boolean, required: false },
         billedAt: { type: Date, required: false },
         receiptDocNum: { type: String, required: false },
         receiptDocUrl: { type: String, required: false },

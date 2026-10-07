@@ -1636,6 +1636,14 @@ const updateCustomer = async (req, res) => {
           );
         }
 
+        // בחשבונית מפורטת: שורה אחת לכל מוצר עם סך הכמות מכל התעודות
+        if (req.body.billing?.mergeInvoiceProducts !== undefined) {
+          customer.set(
+            "billing.mergeInvoiceProducts",
+            !!req.body.billing.mergeInvoiceProducts
+          );
+        }
+
         // מסלול החיוב. ערך לא מוכר נדחה במפורש ולא נשמר כברירת מחדל —
         // לקוח שאמור לקבל חשבונית מיד ונשמר בטעות כחודשי יגלה את זה רק
         // בסוף החודש.

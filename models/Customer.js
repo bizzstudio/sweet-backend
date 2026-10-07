@@ -129,6 +129,11 @@ const CustomerBillingSchema = new mongoose.Schema(
     // מה שהלקוח מצליב בפועל — הוא בודק מול התעודות שקיבל, לא מול מוצר בודד.
     summarizeInvoiceLines: { type: Boolean, default: true },
 
+    // בחשבונית מפורטת: מוצר שחוזר בכמה תעודות מופיע בשורה אחת עם סך
+    // הכמות, במקום שורה לכל תעודה. בקשת הלקוחה (07/10/2026) לשניים-שלושה
+    // לקוחות. חסר משמעות כשהחשבונית מרוכזת. ראה mergeProductLines.
+    mergeInvoiceProducts: { type: Boolean, default: false },
+
     // אופן החיוב:
     //
     //   monthly     — ברירת המחדל. כל משלוח מייצר תעודת משלוח, ובסוף החודש

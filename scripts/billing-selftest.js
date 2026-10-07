@@ -38,7 +38,7 @@ const {
   manualNoteCategoryIds,
   clearCache: clearManualCache,
 } = require("../lib/billing/manualItems");
-const { groupIntoInvoices, summarizeItems, shouldSummarize, describeInvoice, previousMonth, isLastDayOfMonth, releaseStuckClaims, closeMonth, billNoteImmediately } = require("../lib/billing/monthlyBilling");
+const { groupIntoInvoices, summarizeItems, mergeProductLines, shouldMergeProducts, shouldSummarize, describeInvoice, previousMonth, isLastDayOfMonth, releaseStuckClaims, closeMonth, billNoteImmediately } = require("../lib/billing/monthlyBilling");
 const { isNoteTriggerStatus } = require("../lib/billing/autoDeliveryNote");
 const { reissueInvoice } = require("../lib/billing/reissue");
 const { dueDateFor, forCustomer } = require("../lib/billing/paymentTerms");
@@ -264,6 +264,92 @@ const cleanup = async () => {
   check(
     "והגדרת ריכוז אינה גוברת על perDelivery",
     shouldSummarize({ billing: { mode: "perDelivery", summarizeInvoiceLines: true } }) === false
+  );
+
+  // ── איחוד מוצרים בחשבונית מפורטת ──
+  //
+  // בקשת הלקוחה (07/10/2026): שורה אחת לכל מוצר עם סך הכמות מכל התעודות,
+  // כמו בחשבונית של מנוע, במקום שורה לכל תעודה.
+  const pid = (n) => `64a000000000000000000${String(n).padStart(3, "0")}`;
+  const monthLines = [
+    { productId: pid(1), barcode: "397", name: "מים", quantity: 12, unitPrice: 3, lineTotal: 36, isVatFree: false },
+    { productId: pid(2), barcode: "103", name: "חלב", quantity: 6, unitPrice: 6.2, lineTotal: 37.2, isVatFree: false },
+    { productId: pid(1), barcode: "397", name: "מים", quantity: 12, unitPrice: 3, lineTotal: 36, isVatFree: false },
+    { productId: pid(3), barcode: "900", name: "תפוח", quantity: 2, unitPrice: 8, lineTotal: 16, isVatFree: true },
+    { productId: pid(2), barcode: "103", name: "חלב", quantity: 6, unitPrice: 6.5, lineTotal: 39, isVatFree: false },
+  ];
+  const mergedLines = mergeProductLines(monthLines);
+  const sumOf = (rows) => Number(rows.reduce((s, r) => s + r.lineTotal, 0).toFixed(2));
+
+  check("מוצר שחוזר בשתי תעודות מתאחד לשורה אחת", mergedLines.filter((r) => r.name === "מים").length === 1);
+  check(
+    "והכמות והסכום שלו הם סך שתי התעודות",
+    mergedLines.find((r) => r.name === "מים").quantity === 24 &&
+      mergedLines.find((r) => r.name === "מים").lineTotal === 72
+  );
+  check("הברקוד נשמר על השורה המאוחדת", mergedLines.find((r) => r.name === "מים").barcode === "397");
+  check(
+    "מוצר בשני מחירים נשאר בשתי שורות, אחת לכל מחיר",
+    mergedLines.filter((r) => r.name === "חלב").length === 2
+  );
+  check("סכום החשבונית לא השתנה", sumOf(mergedLines) === sumOf(monthLines));
+  check(
+    "כל שורה מסתדרת עם כמות × מחיר — כך iCount מחשב אותה",
+    mergedLines.every((r) => Number((r.quantity * r.unitPrice).toFixed(2)) === r.lineTotal)
+  );
+  check("סדר המוצרים נשאר כסדר הופעתם", mergedLines.map((r) => r.name).join() === "מים,חלב,תפוח,חלב");
+  check("השורות המקוריות לא שונו", monthLines[0].quantity === 12);
+
+  // חייב ופטור אינם מתאחדים גם באותו מוצר — איחוד היה משנה את בסיס המע"מ
+  check(
+    "אותו מוצר, חייב ופטור — שתי שורות",
+    mergeProductLines([
+      { productId: pid(1), name: "א", quantity: 1, unitPrice: 5, lineTotal: 5, isVatFree: false },
+      { productId: pid(1), name: "א", quantity: 1, unitPrice: 5, lineTotal: 5, isVatFree: true },
+    ]).length === 2
+  );
+
+  // ברקוד כפול בקטלוג: שני מוצרים שונים באותו ברקוד אינם מתאחדים
+  check(
+    "ברקוד זהה ושם שונה — שתי שורות",
+    mergeProductLines([
+      { barcode: "111", name: "כוסות", quantity: 1, unitPrice: 5, lineTotal: 5 },
+      { barcode: "111", name: "צלחות", quantity: 1, unitPrice: 5, lineTotal: 5 },
+    ]).length === 2
+  );
+
+  // סחורה שנשקלת: כל שורה עוגלה לאגורה בנפרד, והמכפלה המאוחדת יוצאת
+  // אגורה פחות. הסכום קודם — הקבוצה נשארת כמות שהיא.
+  const weighed = [
+    { productId: pid(4), name: "ענבים", quantity: 1.235, unitPrice: 7.9, lineTotal: 9.76, isVatFree: true },
+    { productId: pid(4), name: "ענבים", quantity: 1.235, unitPrice: 7.9, lineTotal: 9.76, isVatFree: true },
+  ];
+  check("איחוד שהיה משנה את הסכום באגורה אינו מתבצע", mergeProductLines(weighed).length === 2);
+
+  check(
+    "משקלים שמסתדרים מתאחדים, בלי זנב עשרוני בכמות",
+    mergeProductLines([
+      { productId: pid(5), name: "בננה", quantity: 0.1, unitPrice: 10, lineTotal: 1, isVatFree: true },
+      { productId: pid(5), name: "בננה", quantity: 0.2, unitPrice: 10, lineTotal: 2, isVatFree: true },
+    ])[0].quantity === 0.3
+  );
+
+  const mergeOn = { billing: { summarizeInvoiceLines: false, mergeInvoiceProducts: true } };
+  check("איחוד כבוי כברירת מחדל", shouldMergeProducts({ billing: { summarizeInvoiceLines: false } }) === false);
+  check("לקוח מפורט עם איחוד — מאחד", shouldMergeProducts(mergeOn, { summarize: false }) === true);
+  check("חשבונית מרוכזת אינה מאחדת", shouldMergeProducts(mergeOn, { summarize: true }) === false);
+  check("חשבונית מיידית נשארת כמו התעודה", shouldMergeProducts(mergeOn, { immediate: true }) === false);
+  check(
+    "לקוח perDelivery אינו מאחד גם בהפקה ידנית",
+    shouldMergeProducts({ billing: { ...mergeOn.billing, mode: "perDelivery" } }) === false
+  );
+  // שתי רשומות כפולות בקטלוג שנראות זהות על החשבונית מתאחדות
+  check(
+    "אותו שם וברקוד, productId שונה — שורה אחת",
+    mergeProductLines([
+      { productId: pid(8), barcode: "55", name: "במבה", quantity: 2, unitPrice: 4, lineTotal: 8 },
+      { productId: pid(9), barcode: "55", name: "במבה", quantity: 3, unitPrice: 4, lineTotal: 12 },
+    ]).length === 1
   );
 
   // ── מוצרי הריכוז ──
