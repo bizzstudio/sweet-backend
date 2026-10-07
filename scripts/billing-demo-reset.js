@@ -15,21 +15,24 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
 const DeliveryNote = require("../models/DeliveryNote");
+const CustomerBalanceEntry = require("../models/CustomerBalanceEntry");
 
 (async () => {
   await mongoose.connect(process.env.MONGO_URI || process.env.MONGODB_URI);
 
   const query = { "billing.demo": { $exists: true } };
   const affected = await DeliveryNote.countDocuments(query);
+  // תנועות יתרת הלקוח שנוצרו מול חשבון הדמו (תשלומים וזיכויים)
+  const balanceEntries = await CustomerBalanceEntry.countDocuments({ demo: true });
 
-  if (!affected) {
+  if (!affected && !balanceEntries) {
     console.log("אין מצב דמו במסד — לא נדרש ניקוי");
     await mongoose.disconnect();
     return;
   }
 
   const sample = await DeliveryNote.find(query).select("number billing.demo").limit(10).lean();
-  console.log(`${affected} תעודות נושאות מצב דמו. דוגמה:`);
+  console.log(`${affected} תעודות נושאות מצב דמו · ${balanceEntries} תנועות יתרה של דמו. דוגמה:`);
   for (const n of sample) {
     console.log(
       `  תעודה ${n.number}: ${n.billing.demo.status || "—"}` +
@@ -45,7 +48,10 @@ const DeliveryNote = require("../models/DeliveryNote");
   }
 
   const res = await DeliveryNote.updateMany(query, { $unset: { "billing.demo": "" } });
-  console.log(`\n✅ נמחק מצב הדמו מ-${res.modifiedCount} תעודות`);
+  const removed = await CustomerBalanceEntry.deleteMany({ demo: true });
+  console.log(
+    `\n✅ נמחק מצב הדמו מ-${res.modifiedCount} תעודות · נמחקו ${removed.deletedCount} תנועות יתרה`
+  );
 
   await mongoose.disconnect();
 })().catch(async (err) => {

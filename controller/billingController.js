@@ -19,6 +19,7 @@ const creditNotes = require("../lib/billing/creditNotes");
 const { priceItemsForCustomer, priceQuality } = require("../lib/billing/pricing");
 const { listInvoices } = require("../lib/billing/invoices");
 const { listReceipts, isDayString } = require("../lib/billing/receipts");
+const customerBalance = require("../lib/billing/customerBalance");
 const { customerPurchaseReport, SOURCES } = require("../lib/billing/purchaseReport");
 const { calculateVat } = require("../lib/billing/vat");
 const {
@@ -396,8 +397,16 @@ const getInvoices = async (req, res) => {
     const { status, customer } = req.query;
     const { isConfirmed } = require("../lib/billing/paymentTerms");
 
+    const invoices = await listInvoices({ customerId: customer, status });
+    // יתרת הלקוח לצד כל חשבונית: מי שרודף אחרי 800 ₪ צריך לראות שללקוח
+    // כבר יש אצלנו 200. שאילתה אחת לכל הלקוחות שבמסך.
+    const balances = await customerBalance.balancesOf(invoices.map((i) => i.customer));
+
     res.send({
-      invoices: await listInvoices({ customerId: customer, status }),
+      invoices: invoices.map((inv) => ({
+        ...inv,
+        customerBalance: balances.get(String(inv.customer)) || 0,
+      })),
       // המסך חייב לדעת שמועדי הפירעון מבוססים על מיפוי שטרם אושר,
       // אחרת ירדפו אחרי כסף בתאריך שגוי
       termsConfirmed: isConfirmed(),
@@ -732,7 +741,11 @@ const creditInvoice = async (req, res) => {
 
     const result = await monthlyBilling.creditInvoice({ icountDocNum, reason, reopenNotes });
     res.send({
-      message: `חשבונית זיכוי ${result.creditDocNum} הופקה בגין חשבונית ${icountDocNum}`,
+      message:
+        `חשבונית זיכוי ${result.creditDocNum} הופקה בגין חשבונית ${icountDocNum}` +
+        (result.balanceCredited
+          ? ` · ${result.balanceCredited.toFixed(2)} ₪ ששולמו עליה נרשמו כיתרת זכות ללקוח`
+          : ""),
       ...result,
     });
   } catch (err) {
@@ -807,7 +820,13 @@ const reissueInvoiceDoc = async (req, res) => {
         : `חשבונית ${result.docNums.join(", ")} הופקה במקום ${docNum} ` +
           `(זיכוי ${result.creditDocNum})`;
 
-    res.send({ message, ...result });
+    // החשבונית המקורית שולמה: מה ששולם עליה מחכה ביתרת הלקוח, והחשבונית
+    // החדשה מופיעה כלא משולמת עד שיירשם עליה תשלום שיקזז אותו
+    const balanceNote = result.balanceCredited
+      ? ` · ${result.balanceCredited.toFixed(2)} ₪ ששולמו על ${docNum} נרשמו כיתרת זכות ללקוח`
+      : "";
+
+    res.send({ message: message + balanceNote, ...result });
   } catch (err) {
     res.status(400).send({ message: err.message });
   }
@@ -815,12 +834,38 @@ const reissueInvoiceDoc = async (req, res) => {
 
 // ---------- קבלה ----------
 
+/** "יתרת זכות 200.00 ₪" / "יתרת חוב 300.00 ₪" / "היתרה מאוזנת". */
+const balanceText = (balance) =>
+  Math.abs(balance) < 0.005
+    ? "היתרה מאוזנת"
+    : balance > 0
+    ? `יתרת זכות ${balance.toFixed(2)} ₪`
+    : `יתרת חוב ${Math.abs(balance).toFixed(2)} ₪`;
+
 const createReceiptForPayment = async (req, res) => {
   try {
     const { customer, amount, method, forInvoices, details, emailDocument } = req.body || {};
     if (!customer) return res.status(400).send({ message: "חסר מזהה לקוח" });
+    // מזהה שאינו מחרוזת תקינה נכנס לשאילתות כמו שהוא, ואובייקט במקומו
+    // ({$ne: null}) היה מתאים לתעודות של כל הלקוחות
+    if (!isValidId(customer)) return res.status(400).send({ message: "מזהה לקוח לא תקין" });
 
-    const invoices = Array.isArray(forInvoices) ? forInvoices.filter(Boolean) : [];
+    const invoices = Array.isArray(forInvoices)
+      ? forInvoices.filter((n) => typeof n === "string" || typeof n === "number").map(String).filter(Boolean)
+      : [];
+
+    const received = Number(amount) || 0;
+    if (received < 0) return res.status(400).send({ message: "סכום התשלום אינו יכול להיות שלילי" });
+
+    // מה התשלום עושה ליתרת הלקוח: (מה שהתקבל − סכום החשבוניות). מחושב
+    // לפני ההפקה, כי הוא גם מה שקובע אם מותר לסגור חשבונית בלי קבלה.
+    // תשלום על חשבון, בלי חשבונית, נכנס ליתרה במלואו.
+    //
+    // לפני בדיקת התשלום הכפול ולא אחריה: החישוב פונה ל-iCount ולוקח
+    // שניות, ובין הבדיקה ההיא להפקת הקבלה אסור שיהיה יותר מרגע.
+    const settlement = invoices.length
+      ? await customerBalance.planSettlement({ customerId: customer, invoices, received })
+      : await customerBalance.planOnAccount({ customerId: customer, received });
 
     // קבלה כפולה על אותה חשבונית היא מסמך מס מיותר שאי אפשר למחוק, והיא
     // גם מציגה את הלקוח כמי ששילם פעמיים. הבדיקה היא על התעודות שלנו כי
@@ -851,9 +896,58 @@ const createReceiptForPayment = async (req, res) => {
       }
     }
 
+    // סגירה מיתרת הזכות בלבד: שום כסף לא נכנס עכשיו, ולכן אין קבלה.
+    // מותר רק כשהיתרה מכסה את כל החשבונית — אחרת "0 ₪" היה מסמן
+    // חשבונית כמשולמת ורושם את כולה כחוב, בלי שאיש התכוון לכך.
+    if (!(received > 0)) {
+      if (!invoices.length || settlement.balanceBefore + 0.005 < settlement.due) {
+        return res.status(400).send({
+          message: invoices.length
+            ? `יתרת הזכות של הלקוח (${settlement.balanceBefore.toFixed(2)} ₪) אינה מכסה את ` +
+              `החשבונית (${settlement.due.toFixed(2)} ₪) — יש להזין את הסכום שהתקבל`
+            : "יש להזין סכום חיובי",
+        });
+      }
+
+      // התנאי paidAt: null בתוך העדכון עצמו הוא הנעילה: לחיצה כפולה
+      // מגיעה לכאן פעמיים, ורק הראשונה משנה תעודות ומורידה מהיתרה.
+      const claimed = await DeliveryNote.updateMany(
+        {
+          customer,
+          [ledger.f("icountDocNum")]: { $in: invoices },
+          [ledger.f("status")]: "billed",
+          [ledger.f("paidAt")]: null,
+        },
+        { $set: { [ledger.f("paidAt")]: new Date(), [ledger.f("paidFromBalance")]: true } }
+      );
+      if (!claimed.modifiedCount) {
+        return res.status(409).send({ message: "החשבונית כבר סומנה כמשולמת — יש לרענן את המסך" });
+      }
+
+      await customerBalance.record({
+        customer,
+        kind: "fromBalance",
+        delta: settlement.delta,
+        received: 0,
+        invoiceTotal: settlement.due,
+        totalSource: settlement.source,
+        invoices: settlement.invoices,
+        createdBy: adminName(req),
+      });
+
+      return res.send({
+        message:
+          `חשבונית ${invoices.join(", ")} נסגרה מיתרת הזכות · ` +
+          balanceText(settlement.balanceAfter),
+        notesMarkedPaid: claimed.modifiedCount,
+        fromBalance: true,
+        balance: settlement.balanceAfter,
+      });
+    }
+
     const doc = await createReceipt({
       customerId: customer,
-      amount: Number(amount),
+      amount: received,
       method,
       forInvoices: invoices,
       details: details || {},
@@ -893,9 +987,42 @@ const createReceiptForPayment = async (req, res) => {
       }
     }
 
+    // אחרי ההפקה, מאותה סיבה כמו הסימון: הקבלה כבר קיימת, וכשלון כאן
+    // אינו מבטל אותה. אבל יתרה שלא עודכנה היא כסף של לקוח שנשכח, ולכן
+    // התשובה אומרת זאת במפורש ולא רק הלוג.
+    let balance = null;
+    let balanceError = null;
+    try {
+      await customerBalance.record({
+        customer,
+        kind: "payment",
+        delta: settlement.delta,
+        received,
+        invoiceTotal: settlement.due,
+        totalSource: settlement.source,
+        invoices: settlement.invoices,
+        receiptDocNum: doc.docNum,
+        createdBy: adminName(req),
+      });
+      balance = settlement.balanceAfter;
+    } catch (balanceErr) {
+      balanceError = balanceErr.message;
+      console.error(
+        `[billing] קבלה ${doc.docNum} הופקה אך עדכון יתרת הלקוח נכשל: ${balanceErr.message}\n` +
+          `          יש לתקן ידנית בכרטיס הלקוח: ${settlement.delta.toFixed(2)} ₪`
+      );
+    }
+
     res.send({
-      message: `קבלה ${doc.docNum} הופקה${marked ? ` · ${marked} תעודות סומנו כמשולמות` : ""}`,
+      message:
+        `קבלה ${doc.docNum} הופקה${marked ? ` · ${marked} תעודות סומנו כמשולמות` : ""}` +
+        (balanceError
+          ? ` · ⚠️ יתרת הלקוח לא עודכנה — יש לתקן ידנית ${settlement.delta.toFixed(2)} ₪`
+          : settlement.delta !== 0 || settlement.balanceBefore !== 0
+          ? ` · ${balanceText(balance)}`
+          : ""),
       notesMarkedPaid: marked,
+      balance,
       ...doc,
     });
   } catch (err) {
@@ -1450,6 +1577,45 @@ const getInvoiceNotes = async (req, res) => {
 /**
  * חשבוניות של לקוח — הבסיס למסך "מה הלקוח חייב" בכרטיס הלקוח.
  */
+/** יתרת הלקוח והתנועות שהרכיבו אותה. */
+const getCustomerBalance = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    if (!isValidId(customerId)) {
+      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
+    }
+    res.send(await customerBalance.history(customerId));
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/**
+ * תיקון ידני של יתרת הלקוח — למשל כסף שהוחזר לו בהעברה, או יתרה
+ * שהייתה קיימת לפני שהמערכת התחילה לנהל אותה. אינו מפיק שום מסמך.
+ */
+const adjustCustomerBalance = async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    if (!isValidId(customerId)) {
+      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
+    }
+    if (!(await Customer.exists({ _id: customerId }))) {
+      return res.status(404).send({ message: "לקוח לא נמצא" });
+    }
+
+    const balance = await customerBalance.adjust({
+      customerId,
+      delta: req.body?.delta,
+      reason: req.body?.reason,
+      createdBy: adminName(req),
+    });
+    res.send({ message: `היתרה עודכנה · ${balanceText(balance)}`, balance });
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
 const getCustomerOpenInvoices = async (req, res) => {
   try {
     const invoices = await listInvoices({ customerId: req.params.customerId });
@@ -1773,6 +1939,8 @@ module.exports = {
   creditInvoice,
   reissueInvoiceDoc,
   createReceiptForPayment,
+  getCustomerBalance,
+  adjustCustomerBalance,
   getReceipts,
   priceItems,
   createQuote,

@@ -238,6 +238,9 @@ const deliveryNoteSchema = new mongoose.Schema(
       // אותו שיקול כמו ב-icountDocEmailedTo, לקבלה
       receiptEmailedTo: { type: String, default: null },
       paidAt: { type: Date, required: false },
+      // החשבונית נסגרה כולה מיתרת הזכות של הלקוח, בלי קבלה. בלי הסימון
+      // הזה "שולמה" בלי מספר קבלה נראית כמו רישום שנשבר באמצע.
+      paidFromBalance: { type: Boolean, required: false },
 
       // היסטוריית הזיכויים של התעודה.
       //
@@ -288,6 +291,7 @@ const deliveryNoteSchema = new mongoose.Schema(
         receiptDocUrl: { type: String, required: false },
         receiptEmailedTo: { type: String, default: null },
         paidAt: { type: Date, required: false },
+        paidFromBalance: { type: Boolean, required: false },
         credits: [
           {
             creditDocNum: { type: String, required: false },

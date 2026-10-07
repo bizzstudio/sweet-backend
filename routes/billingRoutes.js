@@ -89,6 +89,9 @@ router.patch("/credit-notes/:id/cancel", isAdmin, billingController.cancelCredit
 
 // --- כרטיס לקוח ---
 router.get("/customer/:customerId/open-invoices", isAdmin, billingController.getCustomerOpenInvoices);
+// יתרת הלקוח (זכות/חוב שנשארו מתשלומים קודמים) ותיקון ידני שלה
+router.get("/customer/:customerId/balance", isAdmin, billingController.getCustomerBalance);
+router.post("/customer/:customerId/balance", isAdmin, billingController.adjustCustomerBalance);
 // כל המסמכים של הלקוח במקום אחד — לכרטיס הלקוח
 router.get("/customer/:customerId/documents", isAdmin, billingController.getCustomerDocuments);
 
