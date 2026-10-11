@@ -24,6 +24,7 @@
     "ingest:lines-test": "node script/test-order-lines.js",
     "ingest:resolve-test": "node script/test-resolve-items.js",
     "ingest:replay": "node script/replay-failed-orders.js",
+    "ingest:reprocess": "node script/reprocess-error-orders.js",
     "vocab:test": "node script/test-catalog-vocabulary.js",
     "order:delete-error": "node script/delete-ingestion-error-order.js",
     "order:duplicate-test": "node script/test-duplicate-order.js",
