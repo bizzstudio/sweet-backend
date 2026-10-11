@@ -15,6 +15,7 @@
 const productMatching = require("../utils/productMatching");
 const productAliases = require("../utils/productAliases");
 const catalogVocabulary = require("../utils/catalogVocabulary");
+const manualItems = require("../lib/billing/manualItems");
 
 // ── קטלוג מדומה ──
 const product = (id, he, sku = id) => ({
@@ -36,6 +37,10 @@ const CATALOG = {
   rent: product("rent", "שכירות חודש 08/25 עבור נכס ברחוב בן גוריון 19 בני-ברק"),
   fruit6: product("fruit6", "פירות 6 קילו"),
   fruit8: product("fruit8", "פירות 8 קילו"),
+  // category "produce" היא הקטגוריה הנשקלת (ראה manualNoteCategoryIds למטה)
+  banana: { ...product("banana", "בננות 5.5 קילו"), category: "produce", prices: { price: 55 } },
+  bananaYogurt: product("bananaYogurt", "יוגורט בננות 150 גרם"),
+  cheese: product("cheese", "גבינה צהובה נועם 360 גר'"),
 };
 
 // searchName → תוצאת מנוע ההתאמה
@@ -59,6 +64,47 @@ const MATCHES = {
     alternatives: [{ ...CATALOG.fruit8, score: 49 }],
   },
 };
+
+// המשקל נשאר בשם שנשלח לחיפוש, ולכן הוא חלק מהמפתח
+MATCHES["1.5 קילו בננות"] = {
+  product: CATALOG.banana,
+  score: 100,
+  confidence: 0.53,
+  alternatives: [{ ...CATALOG.bananaYogurt, score: 99 }],
+};
+MATCHES["בננות"] = { product: CATALOG.banana, score: 100, confidence: 0.95, alternatives: [] };
+MATCHES["גבינה צהובה 500 גרם נועם"] = {
+  product: CATALOG.cheese,
+  score: 100,
+  confidence: 0.97,
+  alternatives: [],
+};
+
+const apple5 = { ...product("apple5", "תפוחים 5 קילו"), category: "produce" };
+const apple12 = { ...product("apple12", "תפוחים 12 קילו"), category: "produce" };
+MATCHES["1.5 קילו תפוחים"] = {
+  product: apple5,
+  score: 100,
+  confidence: 0.53,
+  alternatives: [{ ...apple12, score: 99 }],
+};
+MATCHES["3 קילו בננות"] = {
+  product: { ...CATALOG.banana, stock: 1 },
+  score: 100,
+  confidence: 0.53,
+  alternatives: [],
+};
+
+// שליפת הקטגוריות של חלופות — מוחזרת מהקטלוג המדומה במקום מהמסד
+const Product = require("../models/Product");
+Product.find = ({ _id }) => {
+  const all = [...Object.values(CATALOG), apple5, apple12];
+  const found = all.filter((p) => _id.$in.includes(p._id));
+  const query = { select: () => query, lean: async () => found };
+  return query;
+};
+
+manualItems.manualNoteCategoryIds = async () => new Set(["produce"]);
 
 productMatching.matchProductByName = async (name) => {
   const hit = MATCHES[name];
@@ -166,6 +212,54 @@ const run = async () => {
       dropped.length === 0 && items.length + unmatched.length === 1,
       true
     );
+  }
+
+  section("סחורה במשקל");
+  {
+    const { items, unmatched } = await resolveItems(
+      [{ rawName: "1.5 קילו בננות", quantity: 1, quantityAssumed: true }],
+      {}
+    );
+    check("1.5 קילו מתוך ארגז 5.5 נכנס להזמנה", [items.length, unmatched.length], [1, 0]);
+    check("הכמות היא החלק היחסי מהארגז", items[0]?.quantity, 0.273);
+    check("המשקל שהתבקש כתוב למלקט", /1\.5 קילו/.test(items[0]?.note || ""), true);
+    check("אינו מסומן ככמות שהונחה", items[0]?.quantityAssumed, false);
+    // "יוגורט בננות 150 גרם" נושא משקל ואת המילה, אבל אינו סחורה נשקלת
+    check("מוצר ארוז בשם דומה אינו נחשב ארגז מתחרה", items[0]?.autoPicked, undefined);
+    check("הסימון הפנימי אינו יוצא", "weightAsk" in (items[0] || {}), false);
+  }
+  {
+    const { items } = await resolveItems([{ rawName: "בננות", quantity: 8, unit: 'ק"ג' }], {});
+    check('8 ק"ג בעמודת הכמות → 1.455 ארגזים ולא 8', items[0]?.quantity, 1.455);
+    check("היחידה נבלעה בהמרה", items[0]?.unit, null);
+  }
+  {
+    const { items } = await resolveItems([{ rawName: "בננות", quantity: 2 }], {});
+    check("כמות בלי משקל נשארת מספר ארגזים", items[0]?.quantity, 2);
+  }
+  {
+    // סחורה ארוזה: מידה שאין היא מוצר שאין, לא 1.39 אריזות
+    const { items, unmatched } = await resolveItems(
+      [{ rawName: "גבינה צהובה 500 גרם נועם", quantity: 1 }],
+      {}
+    );
+    check("מוצר ארוז במידה אחרת עדיין נעצר לאדם", [items.length, unmatched.length], [0, 1]);
+  }
+  {
+    const { items, unmatched } = await resolveItems(
+      [{ rawName: "1.5 קילו תפוחים", quantity: 1, quantityAssumed: true }],
+      {}
+    );
+    check("שני ארגזים באותו שם — נעצר לאדם ולא נבחר אוטומטית", [items.length, unmatched.length], [0, 1]);
+    check("הסיבה מציגה את שני הארגזים", /5 קילו.*12 קילו/.test(unmatched[0]?.failReason || ""), true);
+  }
+  {
+    // 3 ק"ג מתוך ארגז 5.5 הם 0.545 ארגז — מלאי של ארגז אחד מספיק
+    const { items, unmatched } = await resolveItems(
+      [{ rawName: "3 קילו בננות", quantity: 1, quantityAssumed: true }],
+      {}
+    );
+    check("המלאי נבדק מול החלק המומר", [items.length, unmatched.length, items[0]?.quantity], [1, 0, 0.545]);
   }
 };
 
