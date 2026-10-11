@@ -165,6 +165,23 @@ const pay = (customer, docNum, amount) =>
   check("סגירה חוזרת נדחית", r.status === 409);
   check("ולא ירדה פעמיים", (await customerBalance.balanceOf(customer)) === 50);
 
+  group("כשל ברישום התנועה בסגירה מהיתרה");
+  await invoice(c, "106", 8.47); // 8.47 × 1.18 = 9.99
+  icountTotals.set("106", 10);
+  const realRecord = customerBalance.record;
+  customerBalance.record = async () => { throw new Error("מסד מדומה: נפל"); };
+  r = await pay(c, "106", 0);
+  customerBalance.record = realRecord;
+  check("הבקשה נכשלת", r.status === 400 && /לא נסגרה/.test(r.data.message), r.data?.message);
+  check("החשבונית חזרה למצב לא שולמה", !(await listInvoices({ customerId: customer })).find((i) => i.docNum === "106")?.isPaid);
+  check("והיתרה לא השתנתה", (await customerBalance.balanceOf(customer)) === 50);
+
+  group("אותה חשבונית פעמיים בבקשה אחת");
+  r = await call(controller.createReceiptForPayment, {
+    body: { customer: String(customer), amount: 10, method: "transfer", forInvoices: ["106", "106", 106] },
+  });
+  check("נספרת פעם אחת", r.status === 200 && (await customerBalance.balanceOf(customer)) === 50, r.data?.message);
+
   group("ביטול חשבונית ששולמה");
   let credit = await monthlyBilling.creditInvoice({ icountDocNum: "100", reason: "בדיקה" });
   check("800 חזרו ליתרה (לא 1,000)", credit.balanceCredited === 800, String(credit.balanceCredited));
@@ -184,7 +201,7 @@ const pay = (customer, docNum, amount) =>
 
   group("תצוגה");
   const hist = await call(controller.getCustomerBalance, { params: { customerId: String(customer) } });
-  check("ההיסטוריה מחזירה יתרה ותנועות", hist.data.balance === 850 && hist.data.entries.length === 7, `${hist.data.balance} / ${hist.data.entries.length}`);
+  check("ההיסטוריה מחזירה יתרה ותנועות", hist.data.balance === 850 && hist.data.entries.length === 8, `${hist.data.balance} / ${hist.data.entries.length}`);
   check("החדשה ראשונה עם יתרה מצטברת", hist.data.entries[0].balanceAfter === 850 && hist.data.entries.at(-1).balanceAfter === 200);
   const list = await call(controller.getInvoices, { query: { customer: String(customer), status: "" } });
   check("רשימת החשבוניות נושאת את היתרה", list.data.invoices.every((i) => i.customerBalance === 850));

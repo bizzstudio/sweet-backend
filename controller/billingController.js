@@ -850,8 +850,17 @@ const createReceiptForPayment = async (req, res) => {
     // ({$ne: null}) היה מתאים לתעודות של כל הלקוחות
     if (!isValidId(customer)) return res.status(400).send({ message: "מזהה לקוח לא תקין" });
 
+    // בלי כפילויות: אותו מספר פעמיים היה נספר פעמיים בסכום החשבוניות,
+    // ורושם ללקוח חוב על חשבונית ששילם במלואה
     const invoices = Array.isArray(forInvoices)
-      ? forInvoices.filter((n) => typeof n === "string" || typeof n === "number").map(String).filter(Boolean)
+      ? [
+          ...new Set(
+            forInvoices
+              .filter((n) => typeof n === "string" || typeof n === "number")
+              .map(String)
+              .filter(Boolean)
+          ),
+        ]
       : [];
 
     const received = Number(amount) || 0;
@@ -911,6 +920,7 @@ const createReceiptForPayment = async (req, res) => {
 
       // התנאי paidAt: null בתוך העדכון עצמו הוא הנעילה: לחיצה כפולה
       // מגיעה לכאן פעמיים, ורק הראשונה משנה תעודות ומורידה מהיתרה.
+      const paidAt = new Date();
       const claimed = await DeliveryNote.updateMany(
         {
           customer,
@@ -918,22 +928,45 @@ const createReceiptForPayment = async (req, res) => {
           [ledger.f("status")]: "billed",
           [ledger.f("paidAt")]: null,
         },
-        { $set: { [ledger.f("paidAt")]: new Date(), [ledger.f("paidFromBalance")]: true } }
+        { $set: { [ledger.f("paidAt")]: paidAt, [ledger.f("paidFromBalance")]: true } }
       );
       if (!claimed.modifiedCount) {
         return res.status(409).send({ message: "החשבונית כבר סומנה כמשולמת — יש לרענן את המסך" });
       }
 
-      await customerBalance.record({
-        customer,
-        kind: "fromBalance",
-        delta: settlement.delta,
-        received: 0,
-        invoiceTotal: settlement.due,
-        totalSource: settlement.source,
-        invoices: settlement.invoices,
-        createdBy: adminName(req),
-      });
+      try {
+        await customerBalance.record({
+          customer,
+          kind: "fromBalance",
+          delta: settlement.delta,
+          received: 0,
+          invoiceTotal: settlement.due,
+          totalSource: settlement.source,
+          invoices: settlement.invoices,
+          createdBy: adminName(req),
+        });
+      } catch (balanceErr) {
+        // בלי התנועה החשבונית הייתה נשארת "שולמה" בזמן שהיתרה לא ירדה,
+        // והלקוח היה מקבל אותה בחינם. כאן אין מסמך מס שכבר יצא, ולכן
+        // אפשר פשוט להחזיר את הסימון — לפי אותו paidAt, כדי לא לגעת
+        // בסימון של בקשה אחרת.
+        await DeliveryNote.updateMany(
+          {
+            customer,
+            [ledger.f("icountDocNum")]: { $in: invoices },
+            [ledger.f("paidFromBalance")]: true,
+            [ledger.f("paidAt")]: paidAt,
+          },
+          { $unset: { [ledger.f("paidAt")]: "", [ledger.f("paidFromBalance")]: "" } }
+        ).catch((undoErr) =>
+          console.error(
+            `[billing] חשבונית ${invoices.join(", ")} סומנה כמשולמת מהיתרה אך היתרה לא ` +
+              `עודכנה, וביטול הסימון נכשל: ${undoErr.message}\n` +
+              `          יש להפחית ידנית ${settlement.due.toFixed(2)} ₪ בכרטיס הלקוח`
+          )
+        );
+        throw new Error(`החשבונית לא נסגרה — עדכון יתרת הלקוח נכשל: ${balanceErr.message}`);
+      }
 
       return res.send({
         message:
