@@ -14,30 +14,30 @@
 // ידנית (מוצר שנבחר, כתובת) אינו עובר להזמנה החדשה.
 //
 // הזמנה שנקראת עכשיו במלואה נכנסת ל"טופלה", כלומר: מלאי יורד, נוצרת תעודת
-// משלוח, נשלח מייל לצוות (ללקוח לא — ראה למטה), והיא עולה לליקוט. על הזמנה
+// משלוח והיא עולה לליקוט. מייל אינו נשלח לאיש — ראה למטה. על הזמנה
 // מלפני שבוע שכבר סופקה זו אספקה כפולה — לכן יש --since ו---only. לדוח "מה
 // היה עובר" בלי לכתוב: npm run ingest:replay.
 //
-// הזמנה שנכשלת שוב חוזרת כהזמנת שגיאה חדשה, ונשלחת עליה התראת כשל לצוות.
+// הזמנה שנכשלת שוב חוזרת כהזמנת שגיאה חדשה.
 
 require("dotenv").config();
 const mongoose = require("mongoose");
 const { connectDB } = require("../config/db");
 const Order = require("../models/Order");
 
-// ── בלי מייל ללקוח, בסקריפט הזה בלבד ──
+// ── בלי מיילים בכלל, בסקריפט הזה בלבד ──
 //
-// הודעת "התקבלה הזמנה חדשה" יוצאת בנמען אחד לצוות וללקוח גם יחד. בהרצה
-// חוזרת ההזמנה בת כמה ימים, והלקוח היה מקבל עליה אישור כאילו נשלחה עכשיו.
-// הצוות ממשיך לקבל את ההודעה; רק כתובת הלקוח מוסרת.
+// הרצה חוזרת נוגעת בעשרות הזמנות בנות כמה ימים. בלי החסימה הזו יוצאים בבת
+// אחת: הודעת "התקבלה הזמנה חדשה" לצוות וללקוח על כל הזמנה שנכנסת, והתראת
+// "דורשת השלמה" על כל הזמנה שנכשלת שוב — עשרות מיילים על דבר שהמשרד כבר
+// יודע עליו, ואישור ללקוח על הזמנה מלפני שבוע.
 //
-// ההחלפה נעשית על אובייקט ה-exports **לפני** טעינת הצינור: createOrder שולף
-// את הפונקציה ב-require, ולכן הוא מקבל את העטיפה. השרת עצמו אינו מושפע —
-// זה תהליך נפרד.
+// ההחלפה נעשית על אובייקט ה-exports **לפני** טעינת הצינור: createOrder
+// ו-index שולפים את הפונקציות ב-require, ולכן הם מקבלים את הגרסה השותקת.
+// השרת עצמו אינו מושפע — זה תהליך נפרד, והזמנות חדשות ממשיכות לשלוח כרגיל.
 const emailSender = require("../lib/email-sender/sender");
-const sendToStaffAndCustomer = emailSender.sendOrderNotificationEmail;
-emailSender.sendOrderNotificationEmail = (order, customer) =>
-  sendToStaffAndCustomer(order, { ...customer, email: "" });
+emailSender.sendOrderNotificationEmail = async () => {};
+emailSender.sendEmailSilent = async () => {};
 
 const { reprocess } = require("../lib/order-ingestion");
 const { onOrderStatusChange } = require("../lib/billing/autoDeliveryNote");
@@ -132,8 +132,8 @@ const run = async () => {
     );
   }
 
-  // שליחת המיילים אינה ב-await — נותנים לה לסיים לפני סגירת התהליך
-  if (APPLY) await new Promise((resolve) => setTimeout(resolve, 8000));
+  // חיוב מיידי של לקוח perDelivery (אם יש) רץ בלי await — נותנים לו לסיים
+  if (APPLY) await new Promise((resolve) => setTimeout(resolve, 5000));
   await mongoose.disconnect();
 };
 
