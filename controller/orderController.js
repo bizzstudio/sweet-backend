@@ -66,9 +66,13 @@ const getAllOrders = async (req, res) => {
     // download,
     // sellFrom,
     startDate,
+    dateField,
     customerName,
     cities,
   } = req.query;
+
+  // לפי איזה תאריך מסננים וממיינים: יצירת ההזמנה (ברירת מחדל) או העדכון האחרון
+  const dateKey = dateField === "updatedAt" ? "updatedAt" : "createdAt";
 
   //  day count
   let date = new Date();
@@ -120,7 +124,7 @@ const getAllOrders = async (req, res) => {
   }
 
   if (day) {
-    queryObject.createdAt = { $gte: dateTime, $lte: today };
+    queryObject[dateKey] = { $gte: dateTime, $lte: today };
   }
 
   if (statuses) {
@@ -135,7 +139,7 @@ const getAllOrders = async (req, res) => {
     const startDateData = isIso ? new Date(startDate) : new Date(String(startDate).split("T")[0] + "T00:00:00.000Z");
     const endDateData = isIso ? new Date(endDate) : new Date(String(endDate).split("T")[0] + "T23:59:59.999Z");
 
-    queryObject.createdAt = {
+    queryObject[dateKey] = {
       $gte: startDateData,
       $lte: endDateData,
     };
@@ -178,7 +182,7 @@ const getAllOrders = async (req, res) => {
     const orders = await ordersQuery
       .populate({ path: "status" })
       .populate({ path: "actualMelaket" })
-      .sort({ createdAt: -1 })
+      .sort({ [dateKey]: -1 })
       .skip(skip)
       .limit(limits);
 
