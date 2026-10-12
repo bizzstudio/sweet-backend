@@ -64,6 +64,22 @@ const detachFromOtherGroups = async (customerIds, keepGroupId) => {
   return result.modifiedCount || 0;
 };
 
+// ── כתיבות שיוך רצות אחת-אחת ──
+//
+// שיוך הוא שתי כתיבות: הוספה לקבוצה אחת והוצאה מכל האחרות. שתי בקשות
+// מקבילות שמשייכות את אותו לקוח לשתי קבוצות שונות היו מוציאות אותו זו מהקבוצה
+// של זו, והוא נשאר בלי אף קבוצה — כלומר חוזר בשקט למחירים הישנים (נמצא
+// בבדיקה מול מסד אמיתי, 12/10/2026). התור הזה מריץ אותן בזו אחר זו.
+//
+// התור הוא בתוך התהליך, ולכן מספיק כל עוד ה-backend רץ כתהליך אחד (כך הוא
+// מוגדר ב-pm2). בריבוי תהליכים יידרש transaction.
+let membershipQueue = Promise.resolve();
+const withMembershipLock = (fn) => {
+  const run = membershipQueue.then(fn, fn);
+  membershipQueue = run.catch(() => {});
+  return run;
+};
+
 const duplicateNameMessage = (name) =>
   `כבר קיים מחירון קבוצתי בשם "${name}". יש לבחור שם אחר.`;
 
@@ -242,8 +258,14 @@ const createGroupPriceList = async (req, res) => {
     const customers = await resolveCustomerIds(req.body?.customers);
 
     let group;
+    let movedFromGroups = 0;
     try {
-      group = await GroupPriceList.create({ name, customers, ...built.set });
+      await withMembershipLock(async () => {
+        group = await GroupPriceList.create({ name, customers, ...built.set });
+        // רק אחרי שהקבוצה נוצרה: הוצאה מוקדמת הייתה משאירה את הלקוחות בלי
+        // אף קבוצה אם היצירה נכשלה
+        movedFromGroups = await detachFromOtherGroups(customers, group._id);
+      });
     } catch (err) {
       // שני אדמינים שיצרו את אותו שם באותו רגע
       if (err.code === 11000) {
@@ -251,10 +273,6 @@ const createGroupPriceList = async (req, res) => {
       }
       throw err;
     }
-
-    // רק אחרי שהקבוצה נוצרה: הוצאה מוקדמת הייתה משאירה את הלקוחות בלי אף
-    // קבוצה אם היצירה נכשלה
-    const movedFromGroups = await detachFromOtherGroups(customers, group._id);
 
     res.send({
       message: `המחירון הקבוצתי "${name}" נשמר: ${built.report.imported} שורות, ${customers.length} לקוחות`,
@@ -319,12 +337,18 @@ const updateGroupPriceList = async (req, res) => {
     }
 
     let group;
+    let movedFromGroups = 0;
     try {
-      group = await GroupPriceList.findByIdAndUpdate(
-        existing._id,
-        { $set: set },
-        { new: true }
-      ).lean();
+      await withMembershipLock(async () => {
+        group = await GroupPriceList.findByIdAndUpdate(
+          existing._id,
+          { $set: set },
+          { new: true }
+        ).lean();
+        if (group && customers) {
+          movedFromGroups = await detachFromOtherGroups(customers, group._id);
+        }
+      });
     } catch (err) {
       if (err.code === 11000) {
         return res.status(400).send({ message: duplicateNameMessage(set.name) });
@@ -332,10 +356,6 @@ const updateGroupPriceList = async (req, res) => {
       throw err;
     }
     if (!group) return res.status(404).send({ message: "המחירון הקבוצתי לא נמצא" });
-
-    const movedFromGroups = customers
-      ? await detachFromOtherGroups(customers, group._id)
-      : 0;
 
     res.send({
       message: `המחירון הקבוצתי "${group.name}" עודכן`,
@@ -382,7 +402,9 @@ const setCustomerGroup = async (req, res) => {
 
     const groupId = req.body?.groupId;
     if (!groupId) {
-      await detachFromOtherGroups([new mongoose.Types.ObjectId(customerId)], null);
+      await withMembershipLock(() =>
+        detachFromOtherGroups([new mongoose.Types.ObjectId(customerId)], null)
+      );
       return res.send({
         message: "הלקוח הוסר מהמחירון הקבוצתי",
         customer: customerId,
@@ -396,14 +418,21 @@ const setCustomerGroup = async (req, res) => {
 
     // קודם ההוספה ורק אז ההוצאה מהקבוצה הקודמת: אם הקבוצה החדשה נמחקה
     // בינתיים, הלקוח נשאר בקבוצה שהיה בה ולא נופל בין הכיסאות
-    const group = await GroupPriceList.findByIdAndUpdate(
-      groupId,
-      { $addToSet: { customers: customerId } },
-      { new: true }
-    ).lean();
+    const group = await withMembershipLock(async () => {
+      const updated = await GroupPriceList.findByIdAndUpdate(
+        groupId,
+        { $addToSet: { customers: customerId } },
+        { new: true }
+      ).lean();
+      if (updated) {
+        await detachFromOtherGroups(
+          [new mongoose.Types.ObjectId(customerId)],
+          updated._id
+        );
+      }
+      return updated;
+    });
     if (!group) return res.status(404).send({ message: "המחירון הקבוצתי לא נמצא" });
-
-    await detachFromOtherGroups([new mongoose.Types.ObjectId(customerId)], group._id);
 
     res.send({
       message: `הלקוח שויך למחירון הקבוצתי "${group.name}"`,
