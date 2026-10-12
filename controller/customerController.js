@@ -6,6 +6,7 @@ const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 const Customer = require("../models/Customer");
 const CustomerPriceList = require("../models/CustomerPriceList");
+const GroupPriceList = require("../models/GroupPriceList");
 const Admin = require("../models/Admin");
 const Application = require("../models/Application");
 const Setting = require("../models/Setting");
@@ -1738,6 +1739,14 @@ const deleteCustomer = async (req, res) => {
     // כשל כאן אינו מבטל מחיקה שכבר בוצעה - הלקוח נמחק, והשארית מדווחת ללוג
     await CustomerPriceList.deleteOne({ customer: req.params.id }).catch((err) =>
       console.log(`deleteCustomer: כשל במחיקת מחירון הלקוח — ${err.message}`)
+    );
+    // וגם השיוך למחירון קבוצתי, מאותה סיבה — אחרת מספר הלקוחות בקבוצה כולל
+    // לקוח שכבר אינו קיים
+    await GroupPriceList.updateMany(
+      { customers: req.params.id },
+      { $pull: { customers: req.params.id } }
+    ).catch((err) =>
+      console.log(`deleteCustomer: כשל בהסרת הלקוח ממחירון קבוצתי — ${err.message}`)
     );
 
     res.status(200).send({

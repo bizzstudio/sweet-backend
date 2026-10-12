@@ -10,6 +10,7 @@ const productRoutes = require("../routes/productRoutes");
 const offerRoutes = require("../routes/offerRoutes");
 const customerRoutes = require("../routes/customerRoutes");
 const customerPriceListRoutes = require("../routes/customerPriceListRoutes");
+const groupPriceListRoutes = require("../routes/groupPriceListRoutes");
 const customerHistoryRoutes = require("../routes/customerHistoryRoutes");
 const adminRoutes = require("../routes/adminRoutes");
 const orderRoutes = require("../routes/orderRoutes");
@@ -109,6 +110,8 @@ app.use("/api/customer/", customerRoutes);
 // מחירונים פרטיים ללקוחות. נתיב נפרד ולא תת-נתיב של /api/customer כדי שלא
 // ייבלע ע"י "/:id" שרשום שם
 app.use("/api/customer-price-list/", customerPriceListRoutes);
+// מחירונים קבוצתיים — מחירון אחד לכמה לקוחות, גובר על המחירון הפרטי
+app.use("/api/group-price-list/", groupPriceListRoutes);
 app.use("/api/customer-history/", customerHistoryRoutes);
 app.use("/api/order/", customerOrderRoutes);
 app.use("/api/cashier-orders/", cashierOrderRoutes);

@@ -13,7 +13,14 @@ const mongoose = require("mongoose");
 const CustomerPriceList = require("../models/CustomerPriceList");
 const Customer = require("../models/Customer");
 const Product = require("../models/Product");
-const { normalizeSku, numericSkuKey, getCustomerPriceMap } = require("../utils/customerPriceList");
+const {
+  normalizeSku,
+  numericSkuKey,
+  buildPriceMap,
+  priceForProduct,
+  findGroupPriceList,
+  getCustomerPriceMap,
+} = require("../utils/customerPriceList");
 
 // תקרה לשורות בבקשה אחת. המחירון נשלח בבקשה אחת בכוונה — הדריסה חייבת להיות
 // אטומית, ומחירון מפוצל לאצוות היה משאיר את הלקוח עם חצי מחירון אם אצווה נכשלה.
@@ -641,11 +648,23 @@ const getCustomerPriceList = async (req, res) => {
     const customer = await findCustomer(req.params.customerId);
     if (!customer) return res.status(404).send({ message: "לקוח לא נמצא" });
 
-    const list = await CustomerPriceList.findOne({ customer: customer._id })
-      .select("+items")
-      .lean();
+    const [list, groupList] = await Promise.all([
+      CustomerPriceList.findOne({ customer: customer._id }).select("+items").lean(),
+      findGroupPriceList(customer._id, { withItems: true }),
+    ]);
+
+    // המחירון הקבוצתי גובר על הפרטי, ולכן המסך חייב לדעת עליו: בלעדיו שורה
+    // במחירון הפרטי נראית כמחיר שהלקוח משלם, כשבפועל הקבוצתי דורס אותה
+    const groupPrices = buildPriceMap(groupList?.items || []);
 
     const meta = {
+      group: groupList
+        ? {
+            _id: String(groupList._id),
+            name: groupList.name,
+            itemsCount: groupList.itemsCount || 0,
+          }
+        : null,
       customer: String(customer._id),
       customerName: `${customer.name || ""} ${customer.lastName || ""}`.trim(),
       exists: Boolean(list),
@@ -699,6 +718,8 @@ const getCustomerPriceList = async (req, res) => {
         return {
           sku: item.sku,
           price: item.price,
+          // המחיר שהלקוח משלם בפועל על המק"ט הזה כשהמחירון הקבוצתי דורס אותו
+          groupPrice: priceForProduct(groupPrices, { sku: item.sku }),
           name: item.name || "",
           inCatalog: Boolean(product),
           catalogTitle: product?.title?.he || product?.title?.en || "",
@@ -742,6 +763,81 @@ const getCustomerPriceListSkus = async (req, res) => {
  * שבו עמודת המק"ט הוזזה בשורה אחת ייראה תקין לחלוטין — כל המק"טים קיימים — אבל
  * יתמחר כל מוצר במחיר של מוצר אחר.
  * ------------------------------------------------------------------ */
+/**
+ * ניתוח שורות מחירון מול הקטלוג — מה יתפוס, מה לא קיים, ואיפה השם אינו תואם.
+ * משותף ליבוא של מחירון פרטי ושל מחירון קבוצתי: אותו קובץ, אותן בדיקות.
+ */
+const analyzeImportRows = async (rows) => {
+  const { items, invalid, duplicates } = collectValidRows(rows);
+  const catalogBySku = await fetchCatalogBySku(items.map((item) => item.sku));
+
+  // ── הספירה מופרדת מהדוגמאות ──
+  //
+  // מערכי הדוגמאות חסומים ב-MAX_SAMPLES כדי שקובץ פגום לא יחזיר אלפי שורות,
+  // ולכן `array.length` **אינו** המספר האמיתי. דיווח שלו כספירה הציג "200
+  // שמות אינם תואמים" כשבפועל היו 500 — כלומר המסך הרגיע יותר מהמצב.
+  const unknownSkus = [];
+  const nameMismatches = [];
+  const hiddenProducts = [];
+  let matched = 0;
+  let unknownCount = 0;
+  let nameMismatchCount = 0;
+  let hiddenProductCount = 0;
+  let samePriceCount = 0;
+
+  for (const item of items) {
+    const product = lookupCatalog(catalogBySku, item.sku);
+    if (!product) {
+      unknownCount += 1;
+      if (unknownSkus.length < MAX_SAMPLES) {
+        unknownSkus.push({ sku: item.sku, name: item.name || "", rowNumber: item.rowNumber });
+      }
+      continue;
+    }
+
+    matched += 1;
+
+    if (product.status !== "show") {
+      hiddenProductCount += 1;
+      if (hiddenProducts.length < MAX_SAMPLES) {
+        hiddenProducts.push({ sku: item.sku, catalogTitle: product.title?.he || "" });
+      }
+    }
+
+    const catalogName = normalizeName(product.title?.he || product.title?.en);
+    const fileName = normalizeName(item.name);
+    if (fileName && catalogName && fileName !== catalogName) {
+      nameMismatchCount += 1;
+      if (nameMismatches.length < MAX_SAMPLES) {
+        nameMismatches.push({
+          sku: item.sku,
+          rowNumber: item.rowNumber,
+          fileName: item.name,
+          catalogTitle: product.title?.he || product.title?.en || "",
+        });
+      }
+    }
+
+    if (Number(product.prices?.price) === item.price) samePriceCount += 1;
+  }
+
+  return {
+    received: rows.length,
+    valid: items.length,
+    invalid: invalid.length,
+    invalidSamples: invalid.slice(0, MAX_SAMPLES),
+    duplicates,
+    matched,
+    unknown: unknownCount,
+    unknownSkus,
+    nameMismatchCount,
+    nameMismatches,
+    hiddenProductCount,
+    hiddenProducts,
+    samePriceCount,
+  };
+};
+
 const checkImportCustomerPriceList = async (req, res) => {
   try {
     const customer = await findCustomer(req.params.customerId);
@@ -754,75 +850,7 @@ const checkImportCustomerPriceList = async (req, res) => {
         .send({ message: `ניתן לבדוק עד ${MAX_ROWS} שורות בבקשה אחת` });
     }
 
-    const { items, invalid, duplicates } = collectValidRows(rows);
-    const catalogBySku = await fetchCatalogBySku(items.map((item) => item.sku));
-
-    // ── הספירה מופרדת מהדוגמאות ──
-    //
-    // מערכי הדוגמאות חסומים ב-MAX_SAMPLES כדי שקובץ פגום לא יחזיר אלפי שורות,
-    // ולכן `array.length` **אינו** המספר האמיתי. דיווח שלו כספירה הציג "200
-    // שמות אינם תואמים" כשבפועל היו 500 — כלומר המסך הרגיע יותר מהמצב.
-    const unknownSkus = [];
-    const nameMismatches = [];
-    const hiddenProducts = [];
-    let matched = 0;
-    let unknownCount = 0;
-    let nameMismatchCount = 0;
-    let hiddenProductCount = 0;
-    let samePriceCount = 0;
-
-    for (const item of items) {
-      const product = lookupCatalog(catalogBySku, item.sku);
-      if (!product) {
-        unknownCount += 1;
-        if (unknownSkus.length < MAX_SAMPLES) {
-          unknownSkus.push({ sku: item.sku, name: item.name || "", rowNumber: item.rowNumber });
-        }
-        continue;
-      }
-
-      matched += 1;
-
-      if (product.status !== "show") {
-        hiddenProductCount += 1;
-        if (hiddenProducts.length < MAX_SAMPLES) {
-          hiddenProducts.push({ sku: item.sku, catalogTitle: product.title?.he || "" });
-        }
-      }
-
-      const catalogName = normalizeName(product.title?.he || product.title?.en);
-      const fileName = normalizeName(item.name);
-      if (fileName && catalogName && fileName !== catalogName) {
-        nameMismatchCount += 1;
-        if (nameMismatches.length < MAX_SAMPLES) {
-          nameMismatches.push({
-            sku: item.sku,
-            rowNumber: item.rowNumber,
-            fileName: item.name,
-            catalogTitle: product.title?.he || product.title?.en || "",
-          });
-        }
-      }
-
-      if (Number(product.prices?.price) === item.price) samePriceCount += 1;
-    }
-
-    res.send({
-      customer: String(customer._id),
-      received: rows.length,
-      valid: items.length,
-      invalid: invalid.length,
-      invalidSamples: invalid.slice(0, MAX_SAMPLES),
-      duplicates,
-      matched,
-      unknown: unknownCount,
-      unknownSkus,
-      nameMismatchCount,
-      nameMismatches,
-      hiddenProductCount,
-      hiddenProducts,
-      samePriceCount,
-    });
+    res.send({ customer: String(customer._id), ...(await analyzeImportRows(rows)) });
   } catch (err) {
     console.log("checkImportCustomerPriceList error: ", err);
     res.status(500).send({ message: err.message });
@@ -1145,4 +1173,17 @@ module.exports = {
   checkImportBulkPriceLists,
   importBulkPriceLists,
   MAX_ROWS,
+  // משותפים עם המחירון הקבוצתי (controller/groupPriceListController.js)
+  MAX_NAME_LENGTH,
+  MAX_SAMPLES,
+  DEFAULT_VIEW_LIMIT,
+  MAX_VIEW_LIMIT,
+  toText,
+  normalizeName,
+  collectValidRows,
+  analyzeImportRows,
+  fetchCatalogBySku,
+  fetchExistingSkus,
+  lookupCatalog,
+  existsInCatalog,
 };

@@ -2,13 +2,20 @@
 //
 // פתירת המחיר של לקוח מסוים למוצר מסוים.
 //
-// כלל אחד, במקום אחד: **אם המק"ט מופיע במחירון הלקוח — המחיר שלו קובע. אחרת
-// המחיר של הקטלוג.** לקוח בלי מחירון משלם את מחירי הקטלוג במלואם.
+// כלל אחד, במקום אחד, לפי סדר העדיפויות:
+//
+//   1. המחירון הקבוצתי שהלקוח משויך אליו (GroupPriceList) — גובר על הכל
+//   2. המחירון הפרטי של הלקוח (CustomerPriceList)
+//   3. מחיר הקטלוג
+//
+// ההכרעה היא **לכל מק"ט בנפרד**: מק"ט שאינו במחירון הקבוצתי ממשיך למחירון
+// הפרטי, ורק אחריו לקטלוג. לקוח בלי אף מחירון משלם את מחירי הקטלוג במלואם.
 //
 // כל מסלול שמתמחר הזמנה ללקוח מסוים חייב לעבור מכאן ולא לקרוא prices.price
 // ישירות, אחרת שני מסלולים יתמחרו את אותה הזמנה בשני מחירים שונים.
 
 const CustomerPriceList = require("../models/CustomerPriceList");
+const GroupPriceList = require("../models/GroupPriceList");
 
 const normalizeSku = (value) => String(value ?? "").trim();
 
@@ -55,19 +62,74 @@ const buildPriceMap = (items = []) => {
 };
 
 /**
- * שליפת מחירון הלקוח כמפת מק"ט → מחיר.
- * @returns {Promise<Map<string, number>|null>} null כשללקוח אין מחירון
+ * המחירון הקבוצתי שהלקוח משויך אליו, או null.
+ * @param {boolean} [withItems] לטעון גם את השורות (ברירת המחדל: מטא-נתונים)
+ */
+const findGroupPriceList = async (customerId, { withItems = false } = {}) => {
+  if (!customerId) return null;
+  const query = GroupPriceList.findOne({ customers: customerId }).select(
+    withItems ? "name itemsCount +items" : "name itemsCount"
+  );
+  return query.lean();
+};
+
+// שני מק"טים הם "אותו מק"ט" אם הם זהים, או זהים בצורתם המספרית ("0123"/"123")
+const skuIdentity = (sku) => numericSkuKey(sku) || sku;
+
+/**
+ * איחוד שורות המחירון הפרטי והקבוצתי לרשימה אחת שבה הקבוצתי גובר.
+ *
+ * שורה פרטית מוסרת כשבקבוצתי יש אותו מק"ט — כולל בצורתו המספרית. בלי זה
+ * "0123" במחירון הפרטי היה ממשיך לנצח את "123" במחירון הקבוצתי (ההתאמה
+ * המדויקת קודמת לנפילה המספרית), כלומר הקבוצתי לא היה גובר דווקא במקרה
+ * שהכי קשה לראות בעין.
+ */
+const mergePriceListItems = (ownItems = [], groupItems = []) => {
+  if (!groupItems.length) return ownItems;
+
+  const groupSkus = new Set();
+  for (const item of groupItems) {
+    const sku = normalizeSku(item?.sku);
+    // שורה בלי מחיר חיובי אינה תופסת (ראה buildPriceMap), ולכן גם אינה דורסת
+    if (sku && Number(item?.price) > 0) groupSkus.add(skuIdentity(sku));
+  }
+
+  const kept = ownItems.filter(
+    (item) => !groupSkus.has(skuIdentity(normalizeSku(item?.sku)))
+  );
+  return [...kept, ...groupItems];
+};
+
+/**
+ * שורות המחירון של הלקוח לפי המקור שלהן — לפני האיחוד.
+ * @returns {Promise<{ownItems: Array, groupItems: Array, group: object|null}>}
+ */
+const loadCustomerPriceLayers = async (customerId) => {
+  if (!customerId) return { ownItems: [], groupItems: [], group: null };
+
+  const [own, group] = await Promise.all([
+    CustomerPriceList.findOne({ customer: customerId }).select("+items").lean(),
+    findGroupPriceList(customerId, { withItems: true }),
+  ]);
+
+  return {
+    ownItems: own?.items || [],
+    groupItems: group?.items || [],
+    group: group ? { _id: group._id, name: group.name, itemsCount: group.itemsCount || 0 } : null,
+  };
+};
+
+/**
+ * שליפת המחירים של הלקוח כמפת מק"ט → מחיר — המחירון הקבוצתי מעל הפרטי.
+ * @returns {Promise<Map<string, number>|null>} null כשללקוח אין אף מחירון
  */
 const getCustomerPriceMap = async (customerId) => {
   if (!customerId) return null;
 
-  const doc = await CustomerPriceList.findOne({ customer: customerId })
-    .select("+items")
-    .lean();
+  const { ownItems, groupItems } = await loadCustomerPriceLayers(customerId);
+  if (!ownItems.length && !groupItems.length) return null;
 
-  if (!doc?.items?.length) return null;
-
-  const map = buildPriceMap(doc.items);
+  const map = buildPriceMap(mergePriceListItems(ownItems, groupItems));
   return map.size > 0 ? map : null;
 };
 
@@ -101,6 +163,9 @@ module.exports = {
   normalizeSku,
   numericSkuKey,
   buildPriceMap,
+  findGroupPriceList,
+  mergePriceListItems,
+  loadCustomerPriceLayers,
   getCustomerPriceMap,
   priceForProduct,
   effectivePrice,
