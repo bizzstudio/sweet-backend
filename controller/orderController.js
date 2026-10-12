@@ -55,6 +55,28 @@ const PICKUP_MATCH = {
   shippingCost: { $eq: 0 },
 };
 
+// ── מספר הלקוח מההנהח"ש על ההזמנה ──
+//
+// המספר יושב בכרטיס הלקוח (erp.customerNumber) ולא בהזמנה, ולכן הוא מצורף
+// כאן כשדה נפרד. לא עושים populate ל-user: החנות, אפליקציית הליקוט ומסכי
+// האדמין מצפים ש-user יהיה מזהה ולא אובייקט.
+const withCustomerNumbers = async (orders) => {
+  const ids = [...new Set(orders.map((o) => o?.user && String(o.user)).filter(Boolean))];
+  if (ids.length === 0) return orders.map((o) => o.toJSON());
+
+  const customers = await Customer.find({ _id: { $in: ids } })
+    .select("erp.customerNumber")
+    .lean();
+  const numbers = new Map(
+    customers.map((c) => [String(c._id), c.erp?.customerNumber || ""])
+  );
+
+  return orders.map((o) => ({
+    ...o.toJSON(),
+    customerNumber: numbers.get(String(o.user)) || "",
+  }));
+};
+
 const getAllOrders = async (req, res) => {
   const {
     day,
@@ -176,7 +198,7 @@ const getAllOrders = async (req, res) => {
     // כשמסננים לפי תאריך – מחזירים מסמך מלא (כולל cart) כדי שהדשבורד "מכירות לפי מוצר לפי יום" יציג מוצרים
     const orderSelect = startDate && endDate
       ? undefined
-      : "_id invoice paymentMethod subTotal total user_info discount shippingCost shippingOption status createdAt updatedAt bonus customerSatisfaction";
+      : "_id invoice user paymentMethod subTotal total user_info discount shippingCost shippingOption status createdAt updatedAt bonus customerSatisfaction";
     const ordersQuery = Order.find(queryObject);
     if (orderSelect) ordersQuery.select(orderSelect);
     const orders = await ordersQuery
@@ -229,7 +251,7 @@ const getAllOrders = async (req, res) => {
 
     // console.log('orders :>> ', orders);
     res.send({
-      orders,
+      orders: await withCustomerNumbers(orders),
       limits,
       pages,
       totalDoc,
@@ -762,7 +784,8 @@ const getOrderById = async (req, res) => {
       return res.status(404).send({ message: "Order not found" });
     }
 
-    res.send(order);
+    const [orderWithNumber] = await withCustomerNumbers([order]);
+    res.send(orderWithNumber);
   } catch (err) {
     console.log('getOrderById error: ', err);
     res.status(500).send({
