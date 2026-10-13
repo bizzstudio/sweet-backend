@@ -1933,8 +1933,9 @@ const createGuestCustomer = async (req, res, next) => {
       postalCode
     } = req.body;
 
-    // בדיקת שדות חובה
-    if (!name || !lastName || !email || !phone || !city || !street || !houseNumber || !apartmentNumber) {
+    // בדיקת שדות חובה. הכתובת אינה חובה: אין משלוחים, והחנות שולחת פרטים
+    // כלליים בלבד. שדות כתובת שכן מגיעים (build ישן של החנות) עדיין נשמרים.
+    if (!name || !lastName || !email || !phone) {
       return res.status(400).send({
         message: "נא להזין את כל השדות החובה",
       });
@@ -1992,7 +1993,9 @@ const createGuestCustomer = async (req, res, next) => {
       email: email.toLowerCase(),
       phone: phone || "",
       address: {
-        city: city || {},
+        // בלי עיר משאירים את השדה ריק: אובייקט ריק נכשל בוולידציה של
+        // CitySchema (city_name_he חובה) והיה מפיל את יצירת הלקוח ב-500
+        city: city || undefined,
         street: street || "",
         houseNumber: houseNumber || "",
         apartmentNumber: apartmentNumber || "",
