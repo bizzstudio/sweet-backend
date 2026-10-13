@@ -1259,6 +1259,28 @@ const rejectQuote = async (req, res) => {
 };
 
 /**
+ * עריכת הצעת מחיר קיימת — שורות, כמויות, מחירים והערות.
+ */
+const updateQuote = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה הצעה לא תקין" });
+    }
+    const { items, notes } = req.body || {};
+    if (Array.isArray(items) && items.length > MAX_ITEMS_PER_REQUEST) {
+      return res.status(400).send({
+        message: `יותר מדי פריטים בהצעה (${items.length}). המקסימום הוא ${MAX_ITEMS_PER_REQUEST}`,
+      });
+    }
+
+    const result = await quotes.update(req.params.id, { items, notes });
+    res.send({ message: `הצעת מחיר ${result.quote.number} עודכנה`, ...result });
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
+/**
  * שכפול הצעת מחיר.
  */
 const duplicateQuote = async (req, res) => {
@@ -1979,6 +2001,7 @@ module.exports = {
   createQuote,
   getQuotes,
   getQuote,
+  updateQuote,
   acceptQuote,
   rejectQuote,
   duplicateQuote,

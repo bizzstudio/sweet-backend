@@ -69,6 +69,7 @@ router.post("/quotes/price-items", isAdmin, billingController.priceItems);
 router.get("/quotes", isAdmin, billingController.getQuotes);
 router.post("/quotes", isAdmin, billingController.createQuote);
 router.get("/quotes/:id", isAdmin, billingController.getQuote);
+router.patch("/quotes/:id", isAdmin, billingController.updateQuote);
 router.patch("/quotes/:id/accept", isAdmin, billingController.acceptQuote);
 router.patch("/quotes/:id/reject", isAdmin, billingController.rejectQuote);
 

@@ -33,6 +33,17 @@ const { normalizeTitleForMatch } = require("./productMatching");
 // מחרוזת ריקה = המילה נמחקת. "אחוז" הוא המקרה הבולט: בקטלוג הוא נכתב כ-%,
 // ו-normalizeTitleForMatch מסירה סימנים — כלומר בצד הקטלוג הוא כבר לא קיים,
 // ורק בצד הלקוח הוא נשאר.
+// ── מתג למדידה: בלי המילון שנלמד ──
+//
+// ‏INGESTION_DICTIONARY=off מכבה את כל ההתאמות שנוספו ביד (נרדפות, כתיב,
+// צירופים) ומשאיר רק את נרמול המידות. משמש להשוואה "כללים בלבד מול AI",
+// ואינו מיועד לשרת.
+const DICTIONARY_ON = process.env.INGESTION_DICTIONARY !== "off";
+const BASE_KEYS = new Set([
+  "אחוז", "אחוזים", "אחוזי", "קילו", "קילוגרם", "קילוגרמים", "גרם", "גרמים", "ליטרים",
+  "יחידות", "יחידה", "יחידת", "חבילה", "חבילות", "מארזים", "בקבוקים", "כוסיות", "גליל",
+]);
+
 const SYNONYMS = new Map(
   Object.entries({
     אחוז: "", אחוזים: "", אחוזי: "",
@@ -54,7 +65,11 @@ const SYNONYMS = new Map(
     גמבה: "פלפל", גמבות: "פלפל",
     // כתיב: באקסל "גבינת שמנת נפולאון" ו"נס קפה גקובס"
     נפולאון: "נפוליאון", גייקובס: "גקובס", גיקובס: "גקובס", יעקובס: "גקובס",
-  })
+    // נבדק מול האקסל של 30 לקוחות (12/10/26)
+    zero: "זירו", zerro: "זירו", ליאוזה: "לואיזה", לואיזא: "לואיזה",
+    קונפלקס: "קורנפלקס", גלון: "כד", גלוני: "כד", גלונים: "כד",
+    שוקו: "שוקולד",
+  }).filter(([word]) => DICTIONARY_ON || BASE_KEYS.has(word))
 );
 
 // ── סיומת א' במקום ה' ──
@@ -83,7 +98,7 @@ const finalAlefToHe = (word) =>
 // "שישיה" מול "שישייה", "שניה" מול "שנייה" — כתיב מלא וחסר של אותה מילה.
 // כלל גנרי במקום רשימה, ובטוח מאותה סיבה כמו הסיומת: הוא מוחל על שני הצדדים,
 // ולכן אינו יוצר התאמות שלא היו קיימות אלא רק מיישר כתיב.
-const collapseDoubleYod = (word) => word.replace(/יי/g, "י");
+const collapseDoubleYod = (word) => word.replace(/י{2,}/g, "י");
 
 const canonicalWord = (word) => {
   const mapped = SYNONYMS.get(word);
@@ -107,13 +122,24 @@ const canonicalWord = (word) => {
 // הטקסט כולו לפני החלוקה למילים היה שובר את טבלת הנרדפות, שמפתחותיה נכתבים
 // בכתיב המלא ("שישיית").
 const PHRASES = [
+  // באקסל קפה טורקי נקרא "קפה עלית" ("קפה עלית 1 ק\"ג מוסדי"); הלקוחות
+  // כותבים "קפה שחור". ‏"נס קפה עלית" הוא מוצר אחר ואינו נוגע.
+  [/(?<!נס )קפה עלית/g, "קפה שחור עלית"],
+  // "נייר סופג" הוא מגבות נייר
+  [/ני{1,2}ר סופג/g, "מגבות נייר"],
+  // חצי קילו = 500 גרם ("טחינה 500 גר'" מול "טחינה הר ברכה 1/2 קילו")
+  [/(?:^| )(?:1 2|חצי) (?:קילו|קג)(?= |$)/g, " 500 גר"],
+  // "12OZ" מול "OZ12"
+  [/(\d+) ?oz(?= |$)/g, "oz$1"],
   [/ני{1,2}ר כסף/g, "נייר אלומיניום"],
   [/מגבות? ני{1,2}ר לידי{1,2}ם/g, "נייר צץ רץ"],
   [/ני{1,2}ר ידי{1,2}ם/g, "נייר צץ רץ"],
 ];
 
 const withPhrases = (normalized) =>
-  PHRASES.reduce((text, [from, to]) => text.replace(from, to), normalized);
+  DICTIONARY_ON
+    ? PHRASES.reduce((text, [from, to]) => text.replace(from, to), normalized)
+    : normalized;
 
 const canonicalWords = (text) =>
   withPhrases(normalizeTitleForMatch(text))
@@ -121,4 +147,7 @@ const canonicalWords = (text) =>
     .map(canonicalWord)
     .filter((word) => word.length > 1);
 
-module.exports = { canonicalWords, canonicalWord };
+/** הטקסט המנורמל אחרי החלפת הצירופים — למי שצריך את המספרים שבו. */
+const normalizedText = (text) => withPhrases(normalizeTitleForMatch(text));
+
+module.exports = { canonicalWords, canonicalWord, normalizedText, DICTIONARY_ON };

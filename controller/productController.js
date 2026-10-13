@@ -1378,8 +1378,13 @@ const getShowingStoreProducts = async (req, res) => {
     // התנאי מוגבל בכוונה לענף של title/category — רק הוא יודע לעמד. בלי ההגבלה
     // קריאה כמו ‎?slug=x&page=1 הייתה מדלגת על המיון העברי בסוף הפונקציה
     // ומחזירה totalProducts=0 לצד רשימת מוצרים מלאה.
+    //
+    // ‎all=1 — דף הבית של החנות מציג את כל הקטלוג, בלי קטגוריה ובלי חיפוש.
+    // הדגל מפורש בכוונה: ‎/search בלי שאילתה שולח גם הוא page/limit עם
+    // title ריק, ואסור שיתחיל להחזיר את כל המוצרים במקום "עוד לא חיפשת".
+    const wantsAll = req.query.all === "1" && !slug && !sku;
     const isPaginated =
-      Boolean(title || category) &&
+      Boolean(title || category || wantsAll) &&
       (req.query.page !== undefined || req.query.limit !== undefined);
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 100));
@@ -1489,7 +1494,7 @@ const getShowingStoreProducts = async (req, res) => {
         sku,
         isStoreProduct: { $ne: true }
       }).populate({ path: "category" });
-    } else if (title || category) {
+    } else if (title || category || isPaginated) {
       if (isPaginated) {
         totalProducts = await Product.countDocuments(queryObject);
 

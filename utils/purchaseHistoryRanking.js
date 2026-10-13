@@ -29,7 +29,7 @@ const { normalizeSku, numericSkuKey } = require("./customerPriceList");
 // אותו נרמול שמנוע ההתאמה משתמש בו — ראה ההסבר ב-utils/productAliases על
 // למה שני נרמולים שונים הם כשל שקט
 const { normalizeTitleForMatch } = require("./productMatching");
-const { canonicalWords } = require("./orderWording");
+const { canonicalWords, DICTIONARY_ON } = require("./orderWording");
 
 // ── כמה זמן קנייה נשארת רלוונטית ──
 //
@@ -221,6 +221,9 @@ const lookupProduct = (profile, product) => {
 // יחידות), ושורה כזו צריכה להגיע לאדם.
 const NON_PRODUCT_WORDS = new Set([
   "מארז", "שקית", "שקיות", "חב", "יח", "קג", "גר", "ליטר", "מל", "חצי",
+  // צורת אריזה שהלקוח מזכיר ושם המוצר לא תמיד נושא: "סודה שישייה" מול
+  // "סודה 1.5 ליטר", "שרוול כוסות" מול "כוסות שתיה קרה", "חליטת תה" מול "תה"
+  ...(DICTIONARY_ON ? ["שישיה", "שלישיה", "שרוול", "שרוולים", "חליטת", "חליטה"] : []),
 ]);
 
 // אותיות השימוש שנדבקות למילה: "ולואיזה", "בקופסה", "לידיים"
@@ -240,10 +243,15 @@ const withinOneEdit = (a, b) => {
 
   let i = 0;
   while (i < short.length && long[i] === short[i]) i += 1;
-  // תו אחד שונה, או תו אחד עודף במילה הארוכה
-  return long.length === short.length
-    ? long.slice(i + 1) === short.slice(i + 1)
-    : long.slice(i + 1) === short.slice(i);
+  // תו אחד שונה, שני תווים סמוכים שהתחלפו ("טאולט"/"טואלט"), או תו אחד
+  // עודף במילה הארוכה
+  if (long.length === short.length) {
+    return (
+      long.slice(i + 1) === short.slice(i + 1) ||
+      (long[i] === short[i + 1] && long[i + 1] === short[i] && long.slice(i + 2) === short.slice(i + 2))
+    );
+  }
+  return long.slice(i + 1) === short.slice(i);
 };
 
 // ── שגיאת כתיב מתוקנת רק למילה שאינה קיימת בקטלוג ──
@@ -310,11 +318,17 @@ const productWordsOf = (text) =>
     .filter((word) => word.length > 1 && !/^\d/.test(word) && !NON_PRODUCT_WORDS.has(word));
 
 // כל רצף ספרות בטקסט, כולל ספרה בודדת (‏canonicalWords משמיט אותה)
+// ── מספר עשרוני הוא מספר אחד ──
+//
+// נמדד: "יוגורט ביו 1.8%" התקבל כ"יוגורט ביו מולר 2.8%/1.7%" — אחרי פירוק
+// לספרות, ה-1 וה-8 נמצאו שניהם בשם המוצר. המספרים נקראים מהטקסט המקורי,
+// ו"1/2 קילו"/"חצי קילו" נספרים כ-500 כדי שיתאימו ל"500 גר".
 const numbersOf = (text) =>
-  normalizeTitleForMatch(text)
-    .split(" ")
-    .flatMap(splitDigits)
-    .filter((word) => /^\d+$/.test(word));
+  (
+    String(text || "")
+      .replace(DICTIONARY_ON ? /(?:1\/2|חצי)\s*(?:קילו|ק["״]?ג)/g : /$^/, " 500 ")
+      .match(/\d+(?:[.,]\d+)?/g) || []
+  ).map((number) => number.replace(",", "."));
 
 const titleTextOf = (product) =>
   [product?.title?.he, product?.title?.en].filter(Boolean).join(" ");
@@ -401,11 +415,15 @@ const assortedOf = (text, product, { vocabulary = null } = {}) => {
   const asked = productWordsOf(text);
   // "לחם קל/מלא סוגים שונים": מה שמחובר בלוכסן הוא רשימת האפשרויות, לא חלק
   // מהשם — "לחם חום" הוא אחד מהסוגים בדיוק כמו "קל" ו"מלא".
-  const withoutOptions = titleTextOf(product)
-    .split(/\s+/)
-    .filter((token) => !token.includes("/"))
-    .join(" ");
-  const core = productWordsOf(withoutOptions).filter((word) => !ASSORTED_WORDS.has(word));
+  const tokens = titleTextOf(product).split(/\s+/);
+  const withoutOptions = tokens.filter((token) => !token.includes("/")).join(" ");
+  let core = productWordsOf(withoutOptions).filter((word) => !ASSORTED_WORDS.has(word));
+  // "פסטרמה/נקניק סוגים שונים": כל השם הוא רשימת האפשרויות. אז האפשרות
+  // שהלקוח כתב ("נקניק סלמי") היא שם המוצר.
+  if (!core.length) {
+    const options = productWordsOf(tokens.filter((token) => token.includes("/")).join(" "));
+    core = options.filter((option) => asked.some((word) => sameWord(word, option, vocabulary))).slice(0, 1);
+  }
   // מוצר שכל שמו הוא "מגוון סוגים" אינו עונה לשום דבר מסוים
   if (!core.length || !asked.length) return false;
 
@@ -450,7 +468,11 @@ const VARIANT_STEMS = [
   "נטול", "זירו", "דיאט", "לייט", "טבעונ", "אורגנ", "מלוח", "מתוק", "קלוי", "חריף",
   "וניל", "שוקולד", "תות", "לימון", "בננה", "אפרסק", "מנגו", "פטל", "קרמל", "קוקוס",
 ];
+// שמות מוצר שמתחילים במקרה כמו צבע או טעם: "חומוס" אינו "חום". נמדד 12/10/26:
+// "חומוס קטן" מול "סלט חומוס" נחשב כשורה בלי שם מוצר משותף.
+const NOT_VARIANT_WORDS = new Set(["חומוס", "חומץ", "חומר", "חומרי", "לימונדה"]);
 const isVariantWord = (word) => {
+  if (NOT_VARIANT_WORDS.has(word)) return false;
   const open = openFinal(word);
   return VARIANT_STEMS.some((stem) => open.startsWith(openFinal(stem)));
 };
@@ -468,7 +490,7 @@ const looseSame = (a, b, vocabulary) => {
  * @returns {Array<{product: Object}>} המועמדים הקרובים ביותר, או רשימה ריקה
  *          כשאין מועמד שעומד בתנאים. ההכרעה ביניהם נשארת ל-pickFromHistory.
  */
-const closestOwnProducts = (text, products = [], { vocabulary = null } = {}) => {
+const closestOwnProducts = (text, products = [], { vocabulary = null, usage = null } = {}) => {
   const asked = productWordsOf(text);
   if (!asked.length) return [];
   const allWords = canonicalWords(text);
@@ -516,11 +538,36 @@ const closestOwnProducts = (text, products = [], { vocabulary = null } = {}) => 
     }
   }
 
+  // ── שם המוצר כולו כתוב בשורה ──
+  //
+  // "מארז מאגדת מיני מגנום סוגים שונים כולל שוקולד חם": הלקוח כתב את שם
+  // המוצר שהוא קונה והוסיף הערות. כשכל שם המוצר (שתי מילים ומעלה) נמצא
+  // בשורה, ורק מוצר אחד שלו כזה, מה שנוסף הוא הוראה למלקט.
+  const named = products.filter((product) => {
+    const titleText = titleTextOf(product);
+    const names = productWordsOf(titleText);
+    if (names.length < 2) return false;
+    const titleNumbers = new Set(numbersOf(titleText));
+    if (!numbersOf(text).every((number) => titleNumbers.has(number))) return false;
+    // בשורה חייב להיות יותר משם המוצר לבדו: כשהיא שווה לו בדיוק, גם מוצר
+    // ארוך יותר שלו עונה לה ("מלח למדיח" מול "מלח למדיח כלים"), וההכרעה
+    // ביניהם היא לפי מה שהוא קונה יותר — למטה.
+    if (asked.length <= names.length) return false;
+    return names.every((inTitle) => asked.some((word) => sameWord(word, inTitle, vocabulary)));
+  });
+  if (named.length === 1) return [{ product: named[0] }];
+
   const scored = [];
   for (const product of products) {
     const titleText = titleTextOf(product);
     const title = canonicalWords(titleText);
-    if (!title.some((inTitle) => sameWord(asked[0], inTitle, vocabulary))) continue;
+    const inTitleWord = (word) => title.some((inTitle) => sameWord(word, inTitle, vocabulary));
+    // שם העצם הוא המילה הראשונה, או השנייה כשהראשונה כללית ("אגוז קשיו קלוי")
+    // השנייה חייבת להיות שם של מוצר ("קשיו"), לא מילת מילוי: "סויה ללא סוכר"
+    // התאים כך ל"מסטיק ללא סוכר".
+    const secondIsHead =
+      asked.length >= 3 && isNameWord(asked[1]) && inTitleWord(asked[1]) && inTitleWord(asked[2]);
+    if (!inTitleWord(asked[0]) && !secondIsHead) continue;
 
     // מספר בשורה שאינו בשם המוצר — כמות שלא נקראה או מידה אחרת
     const titleNumbers = new Set(numbersOf(titleText));
@@ -549,9 +596,16 @@ const closestOwnProducts = (text, products = [], { vocabulary = null } = {}) => 
   // השורה מילה נוספת. "חליטת תה לימונית" מול "תה חליטת חורף": ללקוח יש גם
   // "תה ירוק לימונית", ו"לימונית" היא מה שמבדיל. "חלב גד" אינו פוסל את
   // "גבינת עיזים של גד" — הוא חולק עם השורה רק את "גד".
+  // מתחרה הוא רק מוצר שהלקוח עדיין קונה. נמדד: "כפיות קשיח בז' 50 יח'" נחסם
+  // בגלל מוצר שנקנה פעם אחת לפני 51 חודשים, מול 379 קניות של המוביל.
+  const stillBought = (product) => {
+    if (!usage) return true;
+    const entry = usage(product);
+    return Boolean(entry) && (entry.lines >= 3 || monthsSince(entry.lastAt, Date.now()) <= 12);
+  };
   const leaderIds = new Set(leaders.map((entry) => String(entry.product._id)));
   const rivals = products
-    .filter((product) => !leaderIds.has(String(product._id)))
+    .filter((product) => !leaderIds.has(String(product._id)) && stillBought(product))
     .map((product) => canonicalWords(titleTextOf(product)));
   const distinguishing = leaders.some((leader) =>
     leader.missing.some((word) =>
@@ -633,6 +687,18 @@ const guessStrength = (text, product, { vocabulary = null } = {}) => {
   const titleNames = productWordsOf(titleText).filter(isNameWord);
   if (names.length === 1 && titleNames.length && sameWord(names[0], titleNames[0], vocabulary)) return 1;
   return 0;
+};
+
+/**
+ * האם שם של מוצר שהלקוח כתב נמצא בשם המוצר — בלי צבע, גודל ומילות מילוי.
+ * ‏"קפה שחור" ו"קפה עלית מוסדי" חולקים את "קפה"; "שחור" לבדו ו"פלפל שחור"
+ * אינם חולקים שם של מוצר.
+ */
+const sharesNameWord = (text, product, { vocabulary = null } = {}) => {
+  const names = productWordsOf(text).filter(isNameWord);
+  if (!names.length) return false;
+  const title = canonicalWords(titleTextOf(product));
+  return names.some((word) => title.some((inTitle) => sameWord(word, inTitle, vocabulary)));
 };
 
 /** כמה ממילות המוצר שבשורה נמצאות בשם המוצר. */
@@ -857,8 +923,10 @@ module.exports = {
   sharesProductWord,
   sameName,
   assortedOf,
+  isAssorted,
   closestOwnProducts,
   sharedWordCount,
+  sharesNameWord,
   guessStrength,
   lookupProduct,
   // מיוצאים לבדיקות ולכיול הספים
