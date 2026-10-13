@@ -431,14 +431,30 @@ orderSchema.pre("updateOne", async function (next) {
 //
 // require מקומי בתוך ה-hook: deliveryNotes דורש את המודל הזה, וייבוא
 // ברמת הקובץ היה תלות מעגלית.
-const BILLING_RELEVANT_FIELDS = ["cart", "discount", "offerDiscount", "shippingCost"];
+//
+// status נמצא ברשימה בגלל מעבר אחד: ביטול ההזמנה. הזמנה שבוטלה לא יצאה
+// ללקוח, ותעודה שנשארת פתוחה מולה מחויבת בסגירת החודש. הסנכרון עצמו
+// מחליט מה לעשות — בכל מעבר סטטוס אחר הוא מוצא תעודה זהה ואינו כותב.
+const BILLING_RELEVANT_FIELDS = ["cart", "discount", "offerDiscount", "shippingCost", "status"];
 
-const syncNote = (orderId, source) => {
+const runSync = (orderId, source) => {
   require("../lib/billing/deliveryNotes")
     .syncFromOrder(orderId, { changedBy: source })
     .catch((err) =>
       console.error(`[delivery-note] סנכרון התעודה להזמנה ${orderId} נכשל: ${err.message}`)
     );
+};
+
+// עדכון בתוך טרנזקציה אינו נראה מבחוץ עד ה-commit, והסנכרון קורא את
+// ההזמנה בלי ה-session — כלומר היה רואה את המצב הישן ומחליט שאין מה
+// לעשות. לכן הוא נדחה עד שה-session נסגר. אם הטרנזקציה בוטלה הוא ירוץ
+// בכל זאת, ימצא הזמנה שלא השתנתה, ולא יכתוב.
+const syncNote = (orderId, source, session) => {
+  if (session?.inTransaction?.()) {
+    session.once("ended", () => runSync(orderId, source));
+    return;
+  }
+  runSync(orderId, source);
 };
 
 // isModified מתאפס אחרי השמירה, ולכן הדגל נקבע ב-pre ונקרא ב-post.
@@ -450,7 +466,7 @@ orderSchema.pre("save", function (next) {
 
 // לא ב-await ולא זורק: סנכרון תעודה לא צריך להאט או להפיל שמירת הזמנה.
 orderSchema.post("save", function (doc) {
-  if (this.$locals?.billingRelevantChange) syncNote(doc._id, "עדכון הזמנה");
+  if (this.$locals?.billingRelevantChange) syncNote(doc._id, "עדכון הזמנה", doc.$session());
 });
 
 // עדכון דרך שאילתה עוקף את מסלול ה-save לגמרי, ולכן הבדיקה כאן היא על
@@ -482,7 +498,9 @@ const updateTouchesBilling = function () {
 };
 
 orderSchema.post("findOneAndUpdate", function (doc) {
-  if (doc && updateTouchesBilling.call(this)) syncNote(doc._id, "עדכון הזמנה");
+  if (doc && updateTouchesBilling.call(this)) {
+    syncNote(doc._id, "עדכון הזמנה", this.getOptions()?.session);
+  }
 });
 
 // updateOne ו-updateMany הם query middleware במונגוס 8, אבל updateOne קיים
@@ -495,7 +513,9 @@ const syncFromQuery = function () {
   // מזהה ההזמנה נלקח מהשאילתה. עדכון לפי תנאי אחר (בלי _id) אינו מסונכרן:
   // אין מסלול כזה היום, ושאילתה נוספת בכל עדכון הייתה מחיר על משהו שלא קורה.
   const id = this.getQuery()?._id;
-  if (id && updateTouchesBilling.call(this)) syncNote(id, "עדכון הזמנה");
+  if (id && updateTouchesBilling.call(this)) {
+    syncNote(id, "עדכון הזמנה", this.getOptions()?.session);
+  }
 };
 
 orderSchema.post("updateOne", syncFromQuery);
