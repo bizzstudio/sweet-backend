@@ -11,6 +11,7 @@
 
 const mongoose = require("mongoose");
 const CustomerPriceList = require("../models/CustomerPriceList");
+const GroupPriceList = require("../models/GroupPriceList");
 const Customer = require("../models/Customer");
 const Product = require("../models/Product");
 const {
@@ -971,6 +972,43 @@ const MAX_UPSERT_ITEMS = 200;
 // מוצר אחר. וגם אין בזה צורך: התמחור של התעודות (lib/billing/pricing.js)
 // מחפש התאמה מדויקת, ושאר המסלולים מעדיפים התאמה מדויקת על פני הנפילה.
 
+// ── כתיבה אחת, אטומית ──
+//
+// הסרת הגרסה הישנה והוספת החדשה נעשות באותה פעולה, ולכן אין רגע שבו המוצר
+// חסר במחירון, ושני עדכונים מקבילים לא דורסים זה את זה. משמש גם למחירון
+// הפרטי וגם לקבוצתי — לשניהם אותו מבנה שורות.
+const mergeItemsPipeline = (rows, now) => {
+  const replaced = rows.map((row) => row.sku);
+  return [
+    {
+      $set: {
+        items: {
+          $concatArrays: [
+            {
+              $filter: {
+                input: { $ifNull: ["$items", []] },
+                // ‏$literal: מק"ט שמתחיל ב-"$" היה מתפרש אחרת כנתיב שדה, ושורה
+                // ישנה שלו לא הייתה מוחלפת אלא משוכפלת
+                cond: { $not: [{ $in: ["$$this.sku", { $literal: replaced }] }] },
+              },
+            },
+            { $literal: rows },
+          ],
+        },
+      },
+    },
+    {
+      $set: {
+        // ‏importedAt/fileName נשארים של היבוא האחרון — הם מתארים את
+        // הקובץ, ותאריך חדש לצד שם קובץ ישן היה מטעה
+        itemsCount: { $size: "$items" },
+        createdAt: { $ifNull: ["$createdAt", now] },
+        updatedAt: now,
+      },
+    },
+  ];
+};
+
 const upsertCustomerPriceListItems = async (req, res) => {
   try {
     const customer = await findCustomer(req.params.customerId);
@@ -1001,45 +1039,62 @@ const upsertCustomerPriceListItems = async (req, res) => {
       const label = name || toText(title?.he || title?.en || title).slice(0, MAX_NAME_LENGTH);
       return label ? { sku, price, name: label } : { sku, price };
     });
-    const replaced = rows.map((row) => row.sku);
 
-    // ── כתיבה אחת, אטומית ──
+    // ── מחיר ששונה בתעודת משלוח הולך למחירון שממנו המוצר מתומחר ──
     //
-    // הסרת הגרסה הישנה והוספת החדשה נעשות באותה פעולה, ולכן אין רגע שבו
-    // המוצר חסר במחירון, ושני עדכונים מקבילים לא דורסים זה את זה. לקוח בלי
-    // מחירון מקבל מחירון חדש עם השורות האלה בלבד.
-    const now = new Date();
-    const merged = {
-      $concatArrays: [
-        {
-          $filter: {
-            input: { $ifNull: ["$items", []] },
-            // ‏$literal: מק"ט שמתחיל ב-"$" היה מתפרש אחרת כנתיב שדה, ושורה
-            // ישנה שלו לא הייתה מוחלפת אלא משוכפלת
-            cond: { $not: [{ $in: ["$$this.sku", { $literal: replaced }] }] },
-          },
-        },
-        { $literal: rows },
-      ],
-    };
+    // התעודות שולחות applyToGroup. מוצר שנמצא במחירון הקבוצתי של הלקוח
+    // מתעדכן שם — ולכן לכל לקוחות הקבוצה (בקשת הלקוחה, 13/10/2026) — כי
+    // הקבוצתי גובר, ומחיר שנשמר בפרטי לא היה תופס. שאר המוצרים נשמרים
+    // במחירון הפרטי כרגיל. בלי הדגל (עריכת המחירון הפרטי מכרטיס הלקוח)
+    // הכל נשמר בפרטי, כמו תמיד.
+    //
+    // ההכרעה נעשית כאן ולא במסך: המסך יודע מאיפה המוצר מתומחר רק אחרי
+    // שאלה נפרדת לשרת, ושמירה מהירה הייתה מקדימה את התשובה.
+    let ownRows = rows;
+    let groupRows = [];
+    let group = null;
+    if (req.body?.applyToGroup === true) {
+      group = await findGroupPriceList(customer._id, { withItems: true });
+      // אותו כלל כמו בתמחור (lib/billing/pricing.js): התאמה מדויקת, ושורה
+      // בלי מחיר חיובי אינה תופסת — מוצר כזה מתומחר מהפרטי, ולשם הוא הולך
+      const groupNames = new Map(
+        (group?.items || [])
+          .filter((i) => i.sku && i.price > 0)
+          .map((i) => [String(i.sku), i.name])
+      );
+      // שם השורה מהקובץ של הקבוצה נשמר כשאין לו תחליף מהקטלוג
+      groupRows = rows
+        .filter((row) => groupNames.has(row.sku))
+        .map((row) => (row.name || !groupNames.get(row.sku) ? row : { ...row, name: groupNames.get(row.sku) }));
+      ownRows = rows.filter((row) => !groupNames.has(row.sku));
+    }
 
-    let saved;
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    const now = new Date();
+    let savedGroup = null;
+    if (groupRows.length) {
+      // התנאי על customers: לקוח שהוצא מהקבוצה בין הקריאה לכתיבה אינו
+      // משנה מחירון של קבוצה שכבר אינו שייך אליה
+      savedGroup = await GroupPriceList.findOneAndUpdate(
+        { _id: group._id, customers: customer._id },
+        mergeItemsPipeline(groupRows, now),
+        { new: true, timestamps: false }
+      )
+        .select("name customers")
+        .lean();
+      if (!savedGroup) {
+        ownRows = rows;
+        groupRows = [];
+      }
+    }
+
+    // לקוח בלי מחירון מקבל מחירון חדש עם השורות האלה בלבד. כשהכל הלך
+    // לקבוצתי אין כתיבה כלל — אחרת היה נוצר לו מחירון פרטי ריק
+    let saved = null;
+    for (let attempt = 1; ownRows.length && attempt <= 2; attempt++) {
       try {
         saved = await CustomerPriceList.findOneAndUpdate(
           { customer: customer._id },
-          [
-            { $set: { items: merged } },
-            {
-              $set: {
-                // ‏importedAt/fileName נשארים של היבוא האחרון — הם מתארים את
-                // הקובץ, ותאריך חדש לצד שם קובץ ישן היה מטעה
-                itemsCount: { $size: "$items" },
-                createdAt: { $ifNull: ["$createdAt", now] },
-                updatedAt: now,
-              },
-            },
-          ],
+          mergeItemsPipeline(ownRows, now),
           { new: true, upsert: true, timestamps: false }
         )
           .select("itemsCount")
@@ -1051,14 +1106,25 @@ const upsertCustomerPriceListItems = async (req, res) => {
       }
     }
 
+    const priceWord = (n) => (n === 1 ? "המחיר נשמר" : `${n} מחירים נשמרו`);
+    const parts = [];
+    if (ownRows.length) parts.push(`${priceWord(ownRows.length)} במחירון הלקוח`);
+    if (groupRows.length) {
+      parts.push(
+        `${priceWord(groupRows.length)} במחירון הקבוצתי "${savedGroup.name}" — ` +
+          `חל על כל ${savedGroup.customers?.length || 0} לקוחות הקבוצה`
+      );
+    }
+
     res.send({
-      message:
-        rows.length === 1
-          ? "המחיר נשמר במחירון הלקוח"
-          : `${rows.length} מחירים נשמרו במחירון הלקוח`,
+      message: parts.join("; "),
       customer: String(customer._id),
       saved: rows.length,
-      itemsCount: saved?.itemsCount || rows.length,
+      savedToGroup: groupRows.length,
+      // אילו מק"טים נכתבו לקבוצתי — המסך מעדכן לפיהם את המחיר שהוא מציג
+      groupSkus: groupRows.map((row) => row.sku),
+      group: savedGroup ? { _id: String(savedGroup._id), name: savedGroup.name } : null,
+      itemsCount: saved?.itemsCount || ownRows.length,
     });
   } catch (err) {
     console.log("upsertCustomerPriceListItems error: ", err);
