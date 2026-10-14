@@ -48,8 +48,15 @@ const guestOrderLimit = rateLimit({
 // add an order (for registered customers - requires authentication)
 router.post("/add", isAuth, addOrder);
 
-// add an order as guest (for non-registered customers - no authentication required)
-router.post("/add-guest", guestOrderLimit, createGuestCustomer, addOrder);
+// הזמנה כאורח — בוטלה ב-14/10/2026: רק לקוח רשום ומחובר מזמין (‎/add למעלה).
+// הנתיב נשאר ומחזיר 403, כדי שגרסת חנות ישנה שעוד שמורה בדפדפן תקבל הודעה
+// ברורה ולא תיצור הזמנה. להחזרת הרכישה כאורח:
+//   router.post("/add-guest", guestOrderLimit, createGuestCustomer, addOrder);
+router.post("/add-guest", (req, res) => {
+  res.status(403).send({
+    message: "ההזמנה זמינה ללקוחות רשומים בלבד. יש להתחבר כדי להשלים את ההזמנה.",
+  });
+});
 
 // get an order by id (requires authentication OR valid order token)
 router.get("/:id", extractUserDetails, isOrderTokenValid, getOrderById);
