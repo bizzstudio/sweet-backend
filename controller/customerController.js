@@ -942,6 +942,32 @@ const createCustomerByAdmin = async (req, res) => {
   }
 };
 
+// המספר הבא לפתיחת לקוח ידנית: המספר הגבוה ביותר שקיים + 1. נלקחים רק
+// מספרים שכולם ספרות — מספר כמו "A12" לא אומר כלום על הרצף. זו הצעה בלבד:
+// הטופס מאפשר לשנות אותה, והיצירה עצמה עדיין דוחה מספר תפוס.
+const getNextCustomerNumber = async (req, res) => {
+  try {
+    if (!(await isCustomerManager(req?.user))) {
+      return res.status(403).send({ message: "אין לך הרשאה להוסיף לקוחות." });
+    }
+    const numbers = await Customer.distinct("erp.customerNumber");
+    const last = numbers
+      .map((n) => toImportText(n))
+      .filter((n) => /^\d+$/.test(n))
+      .map(Number)
+      // מספר ארוך מאוד (למשל ח.פ שהוקלד בטעות) מאבד דיוק ב-Number
+      .filter((n) => Number.isSafeInteger(n))
+      .reduce((max, n) => Math.max(max, n), 0);
+    res.send({
+      lastNumber: last ? String(last) : null,
+      nextNumber: String(last + 1),
+    });
+  } catch (err) {
+    console.log("getNextCustomerNumber error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
 const loginCustomer = async (req, res) => {
   try {
     // האימייל נשמר במודל באותיות קטנות (lowercase: true), ולכן חיפוש לפי מה
@@ -2039,6 +2065,7 @@ module.exports = {
   importCustomers,
   checkImportCustomers,
   createCustomerByAdmin,
+  getNextCustomerNumber,
   signUpWithProvider,
   verifyEmailAddress,
   forgetPassword,

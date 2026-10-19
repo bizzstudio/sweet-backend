@@ -21,6 +21,7 @@ const {
   importCustomers,
   checkImportCustomers,
   createCustomerByAdmin,
+  getNextCustomerNumber,
   addToBlackListByPhone,
   toggleCustomerCashier,
   validateToken,
@@ -107,6 +108,9 @@ router.post("/import", isAdmin, importCustomers);
 
 // הוספת לקוח ידנית מהפאנל. חייב להירשם לפני "/:id"
 router.post("/create", isAdmin, createCustomerByAdmin);
+
+// המספר הבא ברצף מספרי הלקוח, להצעה בחלון "הוספת לקוח"
+router.get("/next-number", isAdmin, getNextCustomerNumber);
 
 // get all user
 router.get("/", isAdmin, getAllCustomers);
