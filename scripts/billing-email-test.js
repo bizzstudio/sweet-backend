@@ -46,11 +46,14 @@ require.cache[clientPath].exports.call = async (endpoint, params) => {
 const clients = require(clientsPath);
 // המימוש האמיתי נלכד לפני ההחלפה — הוא נבדק בקבוצה משלו בהמשך
 const realEnsureClient = clients.ensureClientForDocument;
-const { billingEmailOf, isDeliverableEmail, toIcountClient } = clients;
+const { billingEmailOf, isDeliverableEmail, toIcountClient, documentClientDetails } = clients;
 
+// פרטי הלקוח למסמך. ברירת המחדל undefined — כמו קורא ישן שלא מחזיר אותם
+let clientDetails;
 require.cache[clientsPath].exports.ensureClientForDocument = async () => ({
   clientId: "9999",
   email: customerEmail,
+  details: clientDetails,
 });
 
 const { createInvoice, createReceipt } = require("../lib/icount/documents");
@@ -160,8 +163,42 @@ const run = async () => {
     check("price_includes_vat=0 נשמר בחשבונית", p.price_includes_vat === 0);
     check("מטבע ושפה נשמרו", p.currency_code === "ILS" && p.lang === "he");
     check("doctype נשמר", p.doctype === "invoice");
-    check("תיאור והנחה נשמרו", p.description === "תיאור" && p.discount_amount === 5);
+    check("תיאור (hwc — השדה שמודפס) והנחה נשמרו", p.hwc === "תיאור" && p.description === undefined && p.discount_amount === 5);
     check("השורות עברו המרה", p.items?.[0]?.unitprice === 10 && p.items[0].sku === "1");
+  }
+
+  group("פרטי הלקוח על המסמך — כתובת, איש קשר, טלפון");
+  {
+    const full = documentClientDetails({
+      phone: "0500000000",
+      erp: { rawAddress: "הנציב 32", rawCity: "תל אביב", contactPerson: "ענת", mobile: "054-7205887" },
+    });
+    check("כתובת מהנהח\"ש", full.address === "הנציב 32, תל אביב", full.address);
+    check("איש קשר וטלפון נייד", full.contactLine === "איש קשר: ענת · טלפון: 054-7205887", full.contactLine);
+
+    const shop = documentClientDetails({
+      phone: "0",
+      address: { street: "הרצל 1", city: { city_name_he: "חולון" }, postalCode: "5800000" },
+      erp: {},
+    });
+    check("בלי הנהח\"ש — כתובת החנות עם מיקוד", shop.address === "הרצל 1, חולון 5800000", shop.address);
+    check("טלפון זבל ובלי איש קשר — אין שורה", shop.contactLine === "", shop.contactLine);
+
+    customerEmail = "lakoach@example.co.il";
+    clientDetails = full;
+    await createInvoice({ customerId: "x", items: ITEMS });
+    check(
+      "client_address נושא כתובת, איש קשר וטלפון",
+      lastParams().client_address === "הנציב 32, תל אביב, איש קשר: ענת · טלפון: 054-7205887",
+      lastParams().client_address
+    );
+    await createReceipt({ customerId: "x", amount: 50 });
+    check("גם בקבלה", lastParams().client_address?.startsWith("הנציב 32"));
+
+    clientDetails = { address: "", contactLine: "" };
+    await createInvoice({ customerId: "x", items: ITEMS });
+    check("בלי פרטים — client_address לא נשלח", !("client_address" in lastParams()));
+    clientDetails = undefined;
   }
 
   group("זיהוי כתובת חיוב (billingEmailOf / isDeliverableEmail)");
