@@ -139,10 +139,11 @@ const cleanup = async () => {
     issued[0].items.length === afterBill.items.length,
     `${issued[0].items.length} מול ${afterBill.items.length}`
   );
+  // מ-20/10/2026 החשבונית נושאת רק את ההערות שנכתבו על התעודה
   check(
-    'התיאור אומר "משלוח" ולא "חיוב חודש"',
-    issued[0].description.startsWith("משלוח") && !issued[0].description.includes("חיוב חודש"),
-    issued[0].description.split("\n")[0]
+    "בלי טקסט אוטומטי על החשבונית",
+    !issued[0].description || issued[0].description === (afterBill.notes || "").trim(),
+    String(issued[0].description)
   );
 
   // ─────────────────────────────────────────────────────────────────
@@ -279,9 +280,9 @@ const cleanup = async () => {
   await billNoteImmediately(note2._id);
   check("משלוח מעורב מפיק חשבונית לכל קטגוריה", issued.length === 2, `הופקו ${issued.length}`);
   check(
-    "התיאורים נושאים את שם הקטגוריה",
-    issued.every((d) => d.description.includes("משלוח —")),
-    issued.map((d) => d.description.split("\n")[0]).join(" | ")
+    "בלי טקסט אוטומטי על החשבוניות",
+    issued.every((d) => !d.description || !d.description.includes("משלוח —")),
+    issued.map((d) => String(d.description)).join(" | ")
   );
 
   // ─────────────────────────────────────────────────────────────────

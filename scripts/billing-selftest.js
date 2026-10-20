@@ -38,7 +38,7 @@ const {
   manualNoteCategoryIds,
   clearCache: clearManualCache,
 } = require("../lib/billing/manualItems");
-const { groupIntoInvoices, summarizeItems, mergeProductLines, shouldMergeProducts, shouldSummarize, describeInvoice, previousMonth, isLastDayOfMonth, releaseStuckClaims, closeMonth, billNoteImmediately } = require("../lib/billing/monthlyBilling");
+const { groupIntoInvoices, summarizeItems, mergeProductLines, shouldMergeProducts, shouldSummarize, invoiceRemarks, previousMonth, isLastDayOfMonth, releaseStuckClaims, closeMonth, billNoteImmediately } = require("../lib/billing/monthlyBilling");
 const { isNoteTriggerStatus } = require("../lib/billing/autoDeliveryNote");
 const { reissueInvoice } = require("../lib/billing/reissue");
 const { dueDateFor, forCustomer } = require("../lib/billing/paymentTerms");
@@ -397,47 +397,34 @@ const cleanup = async () => {
   );
 
   // ─────────────────────────────────────────────────────────────────
-  group("טבלת התעודות על החשבונית");
+  group("הטקסט החופשי על החשבונית");
 
-  const described = describeInvoice("2026-08", notes, null);
-  check("הכותרת נושאת את חודש החיוב", described.includes("חיוב חודש 2026-08"));
-  check("מופיעה כותרת ריכוז התעודות", described.includes("ריכוז תעודות משלוח:"));
-  check("כל תעודה מופיעה בשורה משלה", described.includes("תעודה 1") && described.includes("תעודה 2"));
-  check("מופיע סיכום מספר התעודות", described.includes("סה\"כ 2 תעודות"));
+  // בקשת הלקוחה (20/10/2026): רק מה שנכתב על התעודות, בלי טקסט אוטומטי
+  check("בלי הערות — אין טקסט", invoiceRemarks([{ number: 1 }, { number: 2, notes: "  " }]) === undefined);
+  check(
+    "ההערה שנכתבה מגיעה כמו שהיא",
+    invoiceRemarks([{ number: 1, notes: " עבור דנה, באישור שחר " }]) === "עבור דנה, באישור שחר"
+  );
+  check(
+    "כמה תעודות — לפי סדר התעודות, הערה חוזרת פעם אחת",
+    invoiceRemarks([
+      { number: 3, notes: "ב" },
+      { number: 1, notes: "א" },
+      { number: 2, notes: "א" },
+    ]) === "א\nב"
+  );
+  const long = invoiceRemarks([{ number: 1, notes: "x".repeat(5000) }]);
+  check("טקסט ארוך נחתך לגבול של iCount", long.length === 2000 && long.endsWith("…"));
 
-  // הסכומים בטבלה חייבים להיות אלה שמודפסים על התעודות עצמן. סכום שורות
-  // בלבד היה מציג מספר אחר ממה שכתוב על הנייר שבידי הלקוח.
+  // הסכום שהקבוצה שולחת ל-iCount = מה שמודפס על התעודות (שורות + משלוח - הנחה)
   const withExtras = [
-    { number: 2001, issuedAt: new Date("2026-08-03"), billing: { billingMonth: "2026-08" }, items: [{ lineTotal: 400 }], shippingCost: 30, discount: 20, total: 410 },
-    { number: 2002, issuedAt: new Date("2026-08-11"), billing: { billingMonth: "2026-08" }, items: [{ lineTotal: 200 }], shippingCost: 0, discount: 10, total: 190 },
+    { number: 2001, billing: { billingMonth: "2026-08" }, items: [{ lineTotal: 400 }], shippingCost: 30, discount: 20, total: 410 },
+    { number: 2002, billing: { billingMonth: "2026-08" }, items: [{ lineTotal: 200 }], shippingCost: 0, discount: 10, total: 190 },
   ];
-  const withExtrasDesc = describeInvoice("2026-08", withExtras, null);
-  check("סכום התעודה בטבלה הוא זה שמודפס עליה", withExtrasDesc.includes("410.00 ₪"));
-  check("ולא סכום השורות בלבד", !withExtrasDesc.includes("400.00 ₪"));
-  check("הסיכום תואם למה שיחויב", withExtrasDesc.includes('סה"כ 2 תעודות · 600.00 ₪'));
-  check("ומפרט משלוח והנחה", withExtrasDesc.includes("משלוח 30.00") && withExtrasDesc.includes("הנחה 30.00"));
-
-  // הסכום בכותרת חייב להסכים עם מה שהקבוצה שולחת ל-iCount
   const extrasGroup = groupIntoInvoices(withExtras, false)[0];
   const groupNet =
     extrasGroup.items.reduce((s, i) => s + i.lineTotal, 0) + extrasGroup.shipping - extrasGroup.discount;
-  check("הכותרת והקבוצה מסכימות על הסכום", groupNet === 600, `קיבלתי ${groupNet}`);
-
-  // לקוח בלי משלוח ובלי הנחה — בלי פירוט מיותר בראש המסמך
-  const plainDesc = describeInvoice("2026-08", [
-    { number: 2003, issuedAt: new Date("2026-08-05"), billing: { billingMonth: "2026-08" }, items: [{ lineTotal: 100 }], total: 100 },
-  ], null);
-  check("בלי משלוח והנחה אין פירוט מיותר", !plainDesc.includes("שורות 100.00"));
-
-  // מעל 20 תעודות הרשימה הישנה התכווצה לטווח, כלומר בדיוק בחשבוניות
-  // הגדולות לא היה מה להצליב מולו
-  const many = Array.from({ length: 30 }, (_, i) => ({
-    number: 100 + i,
-    billing: { billingMonth: "2026-08" },
-    items: [{ name: "פריט", lineTotal: 10, categoryName: "מזון" }],
-  }));
-  const bigDesc = describeInvoice("2026-08", many, null);
-  check("גם 30 תעודות מפורטות ולא מתכווצות לטווח", (bigDesc.match(/תעודה 1\d\d/g) || []).length === 30);
+  check("הקבוצה מסכימה עם סכומי התעודות", groupNet === 600, `קיבלתי ${groupNet}`);
 
   // ─────────────────────────────────────────────────────────────────
   group("הנחה קבועה ללקוח");
