@@ -21,6 +21,7 @@ const { listInvoices } = require("../lib/billing/invoices");
 const { listReceipts, isDayString } = require("../lib/billing/receipts");
 const customerBalance = require("../lib/billing/customerBalance");
 const { customerPurchaseReport, SOURCES } = require("../lib/billing/purchaseReport");
+const { summaryReport } = require("../lib/billing/summaryReport");
 const { calculateVat } = require("../lib/billing/vat");
 const {
   createReceipt,
@@ -1156,6 +1157,25 @@ const getCustomerPurchaseReport = async (req, res) => {
   }
 };
 
+/**
+ * עמוד ריכוז — כמה יצא בתעודות וכמה בחשבוניות בטווח, בכסף
+ * (lib/billing/summaryReport).
+ *
+ * ?from=YYYY-MM-DD&to=YYYY-MM-DD&customer=<id>
+ */
+const getSummaryReport = async (req, res) => {
+  try {
+    const { customer, from, to } = req.query;
+
+    const invalid = invalidCustomerDateRange(req.query);
+    if (invalid) return res.status(400).send({ message: invalid });
+
+    res.send(await summaryReport({ customerId: customer, from, to }));
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
 // ---------- הצעות מחיר ----------
 
 /**
@@ -2015,6 +2035,7 @@ module.exports = {
   getCustomerOpenInvoices,
   getCustomerDocuments,
   getCustomerPurchaseReport,
+  getSummaryReport,
   icountMode,
   demoOptions,
   createDemoInvoice,

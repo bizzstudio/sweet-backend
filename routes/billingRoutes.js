@@ -100,6 +100,8 @@ router.get("/customer/:customerId/documents", isAdmin, billingController.getCust
 // דוח רכישות לקוחות: מה קנו ובאילו תעודות.
 // ?from=YYYY-MM-DD&to=YYYY-MM-DD&customer=<id>&kind=auto|manual
 router.get("/reports/customer-purchases", isAdmin, billingController.getCustomerPurchaseReport);
+// עמוד ריכוז: תעודות וחשבוניות בטווח, בכסף. ?from=&to=&customer=
+router.get("/reports/summary", isAdmin, billingController.getSummaryReport);
 
 // --- חשבוניות וגבייה ---
 // ?status=paid|unpaid|overdue&customer=<id>
