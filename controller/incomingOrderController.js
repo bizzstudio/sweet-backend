@@ -40,6 +40,8 @@ const {
   HISTORY_CANDIDATE_LIMIT,
 } = require("../utils/productMatching");
 const { findAliasMatch, saveAlias } = require("../utils/productAliases");
+const { getCustomerPurchaseProfile } = require("../utils/customerPurchaseHistory");
+const { canonicalWords } = require("../utils/orderWording");
 const { extractQualifiers } = require("../lib/order-ingestion/qualifiers");
 const { canonicalPhone } = require("../utils/phone");
 
@@ -701,12 +703,60 @@ const asOrderId = (value, res) => {
   return false;
 };
 
+// כמה מוצרים מההיסטוריה של הלקוח מוצגים לשורה
+const HISTORY_SUGGESTIONS = 8;
+
+/**
+ * מוצרים שהלקוח הזה קנה ושחולקים מילה עם השורה — "מה שהוא כנראה התכוון אליו".
+ *
+ * המועמדים מהקטלוג מדורגים לפי דמיון שם, ולכן "פחיות זירו" מביא את כל
+ * הפחיות בקטלוג. מה שהעובד מחפש הוא בדרך כלל מה שהלקוח קונה כל שבוע, וזה
+ * מוצג ראשון. ממוין לפי מספר מילים משותפות ואז לפי כמה פעמים נקנה.
+ */
+const historyCandidates = async (customerId, text) => {
+  try {
+    const profile = await getCustomerPurchaseProfile(customerId);
+    if (!profile?.byProduct?.size) return [];
+    const words = new Set(canonicalWords(text).filter((word) => word.length > 1));
+    if (!words.size) return [];
+
+    const products = await Product.find({ _id: { $in: [...profile.byProduct.keys()] } })
+      .select("title sku stock status prices.price")
+      .lean();
+
+    return products
+      .map((product) => {
+        const shared = canonicalWords(product.title?.he || "").filter((word) => words.has(word)).length;
+        const entry = profile.byProduct.get(String(product._id)) || {};
+        return { product, shared, entry };
+      })
+      .filter(({ shared }) => shared > 0)
+      .sort((a, b) => b.shared - a.shared || (b.entry.lines || 0) - (a.entry.lines || 0))
+      .slice(0, HISTORY_SUGGESTIONS)
+      .map(({ product, entry }) => ({
+        _id: product._id,
+        title: product.title?.he || product.title?.en || "",
+        sku: product.sku || null,
+        stock: product.stock ?? null,
+        hidden: product.status === "hide",
+        timesBought: entry.lines || 0,
+        lastBoughtAt: entry.lastAt || null,
+      }));
+  } catch (err) {
+    // ההיסטוריה היא תוספת למסך, לא תנאי לו
+    console.log(`historyCandidates error: ${err.message}`);
+    return [];
+  }
+};
+
 const getItemCandidates = async (req, res) => {
   try {
     if (!asOrderId(req.params.orderId, res)) return;
 
     const rawName = String(req.query.name || "").trim();
     if (!rawName) return res.status(400).send({ message: "חסר שם הפריט" });
+    // חיפוש חופשי מהמסך: כשהמוצר הנכון אינו בין המועמדים, העובד מקליד שם אחר
+    const query = String(req.query.q || "").trim().slice(0, 100);
 
     const order = await Order.findById(req.params.orderId).select("user").lean();
     if (!order) return res.status(404).send({ message: "ההזמנה לא נמצאה" });
@@ -714,9 +764,9 @@ const getItemCandidates = async (req, res) => {
     // אותו ניקוי מזהים שהצינור עושה לפני החיפוש, אחרת המסך היה מציג מועמדים
     // אחרים מאלה שהקליטה שקלה — ומי שבוחר היה בוחר מרשימה שאינה הרשימה.
     const { cleanName } = extractQualifiers(rawName);
-    const searchName = cleanName || rawName;
+    const searchName = query || cleanName || rawName;
 
-    const [match, existing] = await Promise.all([
+    const [match, existing, history] = await Promise.all([
       matchProductByName(searchName, {
         requireShown: false,
         requireStock: false,
@@ -736,7 +786,9 @@ const getItemCandidates = async (req, res) => {
         // 20 הרלוונטיים ביותר. זו פעולה של אדם שלוחץ על שורה, לא נתיב חם.
         candidateLimit: HISTORY_CANDIDATE_LIMIT,
       }),
-      findAliasMatch(searchName, order.user),
+      // האליאס נשמר תחת השורה של הלקוח, לא תחת מה שהוקלד בחיפוש
+      findAliasMatch(cleanName || rawName, order.user),
+      historyCandidates(order.user, searchName),
     ]);
 
     // סינכרוני: כל מה שצריך כבר נשלף ב-hydrated למטה. הניסוח הראשון כאן היה
@@ -774,12 +826,14 @@ const getItemCandidates = async (req, res) => {
     res.send({
       searchName,
       candidates,
+      history,
       // מה שכבר הוכרע לשם הזה, אם הוכרע — כדי שהמסך יסמן אותו ולא יבקש
       // מהעובד להחליט מחדש על משהו שכבר הוחלט
       currentAlias: existing
         ? {
-            productId: existing.product._id,
-            title: existing.product.title?.he,
+            productId: existing.product?._id || null,
+            title: existing.ignore ? null : existing.product.title?.he,
+            ignore: Boolean(existing.ignore),
             scope: existing.scope,
           }
         : null,
@@ -792,7 +846,10 @@ const getItemCandidates = async (req, res) => {
 
 /**
  * POST /api/incoming-orders/order/:orderId/resolve-item
- * body: { rawName, productId, scope: "customer" | "global" }
+ * body: { rawName, productId | sku, scope: "customer" | "global" }
+ *
+ * ‏sku במקום productId: הבורר במסך מחפש בכל הקטלוג מתוך הרשימה הרזה
+ * (/products/lite), ושם המזהה של מוצר הוא המק"ט.
  *
  * "זה המוצר שהתכוונו אליו" — שומר את ההכרעה ומחזיר אותה.
  *
@@ -805,9 +862,23 @@ const resolveItemAlias = async (req, res) => {
   try {
     if (!asOrderId(req.params.orderId, res)) return;
 
-    const { rawName, productId, scope = "customer" } = req.body || {};
+    const { rawName, sku, scope = "customer", ignore = false } = req.body || {};
+    let { productId } = req.body || {};
     if (!rawName) return res.status(400).send({ message: "חסר שם הפריט" });
-    if (!productId) return res.status(400).send({ message: "לא נבחר מוצר" });
+    if (!productId && !sku && !ignore) return res.status(400).send({ message: "לא נבחר מוצר" });
+
+    // מק"ט שמופיע ביותר ממוצר אחד אינו מכריע — לא בוחרים אחד מהם בשקט
+    if (!ignore && !productId) {
+      const bySku = await Product.find({ sku: String(sku) }).select("_id").limit(2).lean();
+      if (bySku.length !== 1) {
+        return res.status(400).send({
+          message: bySku.length
+            ? `המק"ט ${sku} שייך ליותר ממוצר אחד בקטלוג — יש לתקן בקטלוג`
+            : `לא נמצא מוצר עם מק"ט ${sku}`,
+        });
+      }
+      productId = bySku[0]._id;
+    }
 
     // ── ההיקף נבדק במפורש ולא נגזר מ"כל מה שאינו global" ──
     //
@@ -832,12 +903,23 @@ const resolveItemAlias = async (req, res) => {
 
     const alias = await saveAlias({
       rawName: searchName,
-      productId,
+      productId: ignore ? null : productId,
+      ignore: Boolean(ignore),
       customerId: scope === "global" ? null : order.user,
       // ‏adminDisplayName ולא req.user.name: השם בסכמה הוא אובייקט ({he,en}),
       // ושמירתו הישירה בשדה String מפילה את הפעולה בשגיאת ולידציה. ראה שם.
       createdBy: adminDisplayName(req.user),
     });
+
+    if (ignore) {
+      return res.send({
+        message:
+          scope === "global"
+            ? `מעכשיו "${searchName}" לא ייקרא כמוצר אצל אף לקוח`
+            : `מעכשיו "${searchName}" לא ייקרא כמוצר אצל הלקוח הזה`,
+        alias,
+      });
+    }
 
     const product = await Product.findById(productId).select("title sku").lean();
 

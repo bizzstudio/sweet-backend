@@ -47,6 +47,9 @@ const findAliasMatch = async (rawName, customerId = null) => {
   const alias =
     found.find((a) => a.customer && String(a.customer) === String(customerId)) || found[0];
 
+  const scope = alias.customer ? "customer" : "global";
+  if (alias.ignore) return { ignore: true, product: null, alias, scope };
+
   const product = await Product.findById(alias.product).lean();
 
   // ── מוצר שנמחק מהקטלוג ──
@@ -57,11 +60,7 @@ const findAliasMatch = async (rawName, customerId = null) => {
   // חוזרים למצב שלפני האליאס.
   if (!product) return null;
 
-  return {
-    product,
-    alias,
-    scope: alias.customer ? "customer" : "global",
-  };
+  return { product, alias, scope };
 };
 
 /**
@@ -83,9 +82,10 @@ const recordAliasHit = (aliasId) =>
  *
  * @returns {Promise<Object>} האליאס שנשמר
  */
-const saveAlias = async ({ rawName, productId, customerId = null, createdBy = null }) => {
+const saveAlias = async ({ rawName, productId, customerId = null, createdBy = null, ignore = false }) => {
   const key = aliasKey(rawName);
   if (!key) throw new Error("שם ריק — אי אפשר לשמור אליאס");
+  if (ignore) return upsertAlias(key, customerId, { product: null, ignore: true, sourceName: String(rawName).trim(), createdBy });
   if (!productId) throw new Error("לא נבחר מוצר");
 
   // ‏findById על מחרוזת שאינה ObjectId זורק CastError, וההודעה הגולמית שלו
@@ -98,13 +98,18 @@ const saveAlias = async ({ rawName, productId, customerId = null, createdBy = nu
   const product = await Product.findById(productId).select("_id").lean();
   if (!product) throw new Error("המוצר לא נמצא בקטלוג");
 
+  return upsertAlias(key, customerId, {
+    product: productId,
+    ignore: false,
+    sourceName: String(rawName).trim(),
+    createdBy,
+  });
+};
+
+const upsertAlias = async (key, customerId, fields) => {
   const filter = { key, customer: customerId || null };
   const update = {
-    $set: {
-      product: productId,
-      sourceName: String(rawName).trim(),
-      createdBy,
-    },
+    $set: fields,
     // מונה השימושים מתאפס בהכרעה חדשה: הוא סופר כמה פעמים *ההכרעה הזו*
     // שירתה, ולא כמה פעמים השם הופיע.
     $setOnInsert: { hits: 0 },

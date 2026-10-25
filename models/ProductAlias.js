@@ -41,11 +41,19 @@ const productAliasSchema = new mongoose.Schema(
       default: null,
     },
 
+    // ריק כשההכרעה היא "זו אינה שורת מוצר" (ignore)
     product: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Product",
-      required: true,
+      required: function () {
+        return !this.ignore;
+      },
+      default: null,
     },
+
+    // "זו אינה שורת מוצר": כותרת, שאלה, שם של עובד. השורה יורדת להערת ההזמנה
+    // בכל פעם שהלקוח כותב אותה, במקום לעצור את ההזמנה שוב.
+    ignore: { type: Boolean, default: false },
 
     // הטקסט המקורי לפני נרמול — מוצג בממשק הניהול. `key` אינו קריא לאדם
     // ("קולה זירו" ו-"קולה  זירו!" מתמפים לאותו מפתח), ובלי המקור אי אפשר

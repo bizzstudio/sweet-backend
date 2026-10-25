@@ -265,6 +265,17 @@ const orderSchema = new mongoose.Schema(
             unit: { type: String },
             note: { type: String },
             failReason: { type: String },
+            // המוצרים שהקליטה הציעה לשורה — המסך מציג אותם כבחירה בלחיצה אחת
+            suggestions: {
+              type: [
+                {
+                  productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product" },
+                  title: { type: String },
+                  _id: false,
+                },
+              ],
+              default: undefined,
+            },
             _id: false,
           },
         ],
