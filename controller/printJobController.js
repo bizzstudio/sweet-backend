@@ -22,6 +22,7 @@ const crypto = require("crypto");
 const mongoose = require("mongoose");
 const PrintJob = require("../models/PrintJob");
 const { generateDeliveryNotePdf, NoteNotFoundError } = require("../lib/printing/deliveryNotePdf");
+const { markOriginalPrinted } = require("../lib/printing/printJobs");
 
 // משימה שנתפסה ולא נסגרה בתוך הזמן הזה נחשבת נטושה — המחשב כובה, הסוכן
 // קרס, הרשת נפלה באמצע. היא חוזרת ל-pending בסבב הבא.
@@ -184,6 +185,14 @@ const markPrinted = async (req, res) => {
     );
 
     if (!job) return respondToStaleReport(req, res, "printed");
+
+    // מכאן כל הדפסה של התעודה היא "העתק". תקלה ברישום לא הופכת את הדיווח
+    // לכשלון — הנייר כבר יצא, וכשלון היה מחזיר את המשימה לתור ומדפיס שוב
+    try {
+      await markOriginalPrinted(job.docId);
+    } catch (err) {
+      console.error(`[print] רישום המקור של תעודה ${job.docNumber || job.docId} נכשל: ${err.message}`);
+    }
 
     console.log(`[print] תעודה ${job.docNumber || job.docId} הודפסה`);
     res.json({ message: "סומן כהודפס", jobId: job._id });

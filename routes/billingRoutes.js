@@ -47,6 +47,12 @@ router.post("/delivery-notes/:id/duplicate", isAdmin, billingController.duplicat
 router.post("/delivery-notes/:id/bill", isAdmin, billingController.billDeliveryNote);
 // הדפסה. הדפסה חוזרת היא POST כי היא מוציאה נייר; מצב ההדפסה הוא GET.
 router.post("/delivery-notes/:id/reprint", isAdmin, billingController.reprintDeliveryNote);
+// חלון ההדפסה באדמין נסגר — המקור יצא, ומכאן רק "העתק"
+router.post(
+  "/delivery-notes/:id/original-printed",
+  isAdmin,
+  billingController.markDeliveryNoteOriginalPrinted
+);
 router.get("/delivery-notes/:id/print-status", isAdmin, billingController.getDeliveryNotePrintStatus);
 
 // --- סגירת חודש ---

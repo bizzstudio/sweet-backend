@@ -153,6 +153,11 @@ const deliveryNoteSchema = new mongoose.Schema(
     issuedAt: { type: Date, default: Date.now },
     issuedBy: { type: String, required: false },
 
+    // מתי יצא ה"מקור" לראשונה — מהמדפסת האוטומטית או מחלון ההדפסה באדמין.
+    // בקשת הלקוחה (26/10/2026): מקור יש רק אחד. כל הדפסה אחרי זו יוצאת
+    // כדף אחד "העתק" (lib/printing/deliveryNotePdf.js, BillingDocument.jsx).
+    originalPrintedAt: { type: Date, default: null },
+
     // התעודה נערכה ביד מהמסך אחרי שנוצרה.
     //
     // רלוונטי רק לתעודה אוטומטית, ומטרתו אחת: לעצור את syncFromOrder.

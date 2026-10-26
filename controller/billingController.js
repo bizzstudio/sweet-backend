@@ -37,7 +37,11 @@ const ledger = require("../lib/billing/ledger");
 const { withContactPhone } = require("../lib/billing/contactPhone");
 const { withCustomerAddress } = require("../lib/billing/customerAddress");
 const PrintJob = require("../models/PrintJob");
-const { queueDeliveryNote, isEnabled: printingEnabled } = require("../lib/printing/printJobs");
+const {
+  queueDeliveryNote,
+  markOriginalPrinted,
+  isEnabled: printingEnabled,
+} = require("../lib/printing/printJobs");
 
 // תקרות על קלט מהרשת. limit לא חסום מאפשר לבקשה אחת לשלוף את כל
 // הקולקציה, ומערך פריטים לא חסום מאפשר להעמיס את התמחור בשאילתה ענקית.
@@ -577,6 +581,25 @@ const reprintDeliveryNote = async (req, res) => {
     }
 
     res.send({ message: `תעודה ${note.number} נשלחה להדפסה` });
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/**
+ * חלון ההדפסה באדמין נסגר — מכאן התעודה מודפסת כ"העתק" בלבד.
+ *
+ * הדפדפן אינו מגלה אם הנייר באמת יצא או שהחלון בוטל; הלקוחה בחרה
+ * (26/10/2026) שגם זה נחשב הדפסה של המקור.
+ */
+const markDeliveryNoteOriginalPrinted = async (req, res) => {
+  try {
+    if (!isValidId(req.params.id)) {
+      return res.status(400).send({ message: "מזהה תעודה לא תקין" });
+    }
+    const originalPrintedAt = await markOriginalPrinted(req.params.id);
+    if (!originalPrintedAt) return res.status(404).send({ message: "תעודה לא נמצאה" });
+    res.send({ originalPrintedAt });
   } catch (err) {
     res.status(500).send({ message: err.message });
   }
@@ -2007,6 +2030,7 @@ module.exports = {
   duplicateDeliveryNote,
   billDeliveryNote,
   reprintDeliveryNote,
+  markDeliveryNoteOriginalPrinted,
   getDeliveryNotePrintStatus,
   previewMonth,
   openCustomers,
