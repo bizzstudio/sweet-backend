@@ -442,7 +442,8 @@ const updateDeliveryNote = async (req, res) => {
       return res.status(400).send({ message: "מזהה תעודה לא תקין" });
     }
 
-    const { items, manualReference, issuedAt, notes, shippingCost, discount } = req.body || {};
+    const { items, manualReference, issuedAt, notes, shippingCost, discount, customerId } =
+      req.body || {};
 
     if (Array.isArray(items) && items.length > MAX_ITEMS_PER_REQUEST) {
       return res
@@ -460,6 +461,7 @@ const updateDeliveryNote = async (req, res) => {
       notes,
       shippingCost,
       discount,
+      customerId,
       changedBy: adminName(req),
     });
 
