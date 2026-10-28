@@ -108,6 +108,13 @@ const CustomerBillingSchema = new mongoose.Schema(
     // עם תקציבים נפרדים למחלקות) דורשים חשבונית לכל קטגוריה בנפרד.
     splitInvoiceByCategory: { type: Boolean, default: false },
 
+    // פיצול חלקי (בקשה 28/10/2026): חשבונית אחת למזון ופירות, וחשבונית
+    // נפרדת לתעודות שרובן ח.ניקוי+ח"פ. הפיצול לפי תעודה שלמה, כמו
+    // splitInvoiceByCategory — תעודה אינה מתחלקת בין שתי חשבוניות, כי
+    // הזיכוי, התיקון והקבלות מניחים חשבונית אחת לתעודה. כשגם
+    // splitInvoiceByCategory דלוק, הוא גובר.
+    separateDisposablesInvoice: { type: Boolean, default: false },
+
     // אחוז הנחה קבוע שסוכם עם הלקוח, ויורד מכל מסמך שמופק לו — תעודת
     // משלוח, הצעת מחיר והחשבונית החודשית.
     //

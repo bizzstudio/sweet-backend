@@ -1631,6 +1631,13 @@ const updateCustomer = async (req, res) => {
           );
         }
 
+        if (req.body.billing?.separateDisposablesInvoice !== undefined) {
+          customer.set(
+            "billing.separateDisposablesInvoice",
+            !!req.body.billing.separateDisposablesInvoice
+          );
+        }
+
         // אחוז ההנחה הקבוע של הלקוח. יורד מכל מסמך שמופק לו מכאן והלאה
         // (תעודה, הצעה, חשבונית) — ראה lib/billing/pricing.
         //
