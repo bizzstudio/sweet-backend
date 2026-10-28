@@ -180,11 +180,8 @@ const validateEntries = async (list) => {
 
     // ‏0, ריק או לא-מספר = "כמו בשורה". כמות קבועה של 0 הייתה מכניסה להזמנה
     // שורה שאין בה כלום — מי שלא רוצה מוצר מסיר אותו מהרשימה.
-    const quantity = Number(raw?.quantity);
-    entries.push({
-      product: productId,
-      quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : null,
-    });
+    // כמות אינה נשמרת: כל מוצר נכנס בכמות שבשורה (ראה resolveItems)
+    entries.push({ product: productId, quantity: null });
   }
 
   const found = await Product.find({ _id: { $in: entries.map((entry) => entry.product) } })

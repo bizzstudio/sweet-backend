@@ -153,7 +153,7 @@ const describe = (result) => {
     // ── שורה אחת, כמה מוצרים ──
     //
     // "חד פעמי סכו"ם וצלחות" → מזלגות, סכינים, כפות, צלחות. הכמות של כל מוצר
-    // היא זו שבשורה, אלא אם נקבעה לו כמות משלו.
+    // היא זו שבשורה — גם כשנשלחה כמות, היא אינה נשמרת.
     section("אליאס של כמה מוצרים");
     await saveAlias({
       rawName: TEST_NAME_MULTI,
@@ -167,9 +167,9 @@ const describe = (result) => {
       `${productA.title?.he} + ${productB.title?.he}`
     );
     check(
-      "בלי כמות משלו — הכמות של השורה; עם כמות — שלו",
+      "כל מוצר בכמות של השורה",
       multi.items.map((item) => item.quantity).join(","),
-      "3,2"
+      "3,3"
     );
     check("שום דבר לא נשאר לאדם", multi.unmatched.length, 0);
     check(
@@ -192,9 +192,9 @@ const describe = (result) => {
     await updateAliasProducts(saved._id, [{ productId: productB._id, quantity: 5 }]);
     const edited = await resolveOne(TEST_NAME_MULTI, customer);
     check(
-      "אחרי הסרת מוצר — המוצר שנשאר, בכמות שנקבעה לו",
+      "אחרי הסרת מוצר — המוצר שנשאר, בכמות של השורה",
       edited.items.map((item) => `${item.product.title?.he} ×${item.quantity}`).join(" + "),
-      `${productB.title?.he} ×5`
+      `${productB.title?.he} ×3`
     );
     check(
       "מונה השימושים לא התאפס בעריכה",
