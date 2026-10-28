@@ -194,50 +194,38 @@ const cleanup = async () => {
   ];
   const rolled = summarizeItems(mixedLines);
 
-  check("ריכוז מקבץ לשורה אחת לכל קטגוריה", rolled.length === 3, `קיבלתי ${rolled.length}`);
-  // הנוסח שהתבקש: "ריכוז תעודות משלוח" ואחריו שם הקטגוריה, בלי תוספות
+  // בקשה 28/10/2026: הפרדה רק לפי מע"מ — כיבוד (כל החייב) ופירות (הפטור)
+  check("ריכוז מקבץ לשתי שורות — חייב ופטור", rolled.length === 2, `קיבלתי ${rolled.length}`);
   check(
-    "השורה נושאת את שם הקטגוריה בנוסח שהתבקש",
-    rolled.some((r) => r.name === "ריכוז תעודות משלוח מזון"),
-    rolled.map((r) => r.name).join(" | ")
+    "החייב נקרא כיבוד ומאחד מזון עם ח.ניקוי+ח\"פ",
+    rolled.some((r) => r.name === "ריכוז תעודות משלוח כיבוד" && !r.isVatFree && r.lineTotal === 115),
+    rolled.map((r) => `${r.name}=${r.lineTotal}`).join(" | ")
   );
+  check("החייב ראשון", rolled[0].isVatFree === false);
   check(
-    "בקטגוריה אחידה אין הערת מע\"מ מיותרת",
-    rolled.every((r) => !r.name.includes("(")),
-    rolled.map((r) => r.name).join(" | ")
-  );
-  check(
-    "סכום הקטגוריה נשמר",
-    rolled.find((r) => r.name.includes("מזון")).lineTotal === 100
-  );
-  check("שורה פטורה נשארת פטורה", rolled.some((r) => r.isVatFree));
-  check(
-    "ושמה הוא שם הקטגוריה שלה",
-    rolled.some((r) => r.name === "ריכוז תעודות משלוח פירות" && r.isVatFree)
+    "הפטור, כשכולו פירות, נקרא פירות",
+    rolled.some((r) => r.name === "ריכוז תעודות משלוח פירות" && r.isVatFree && r.lineTotal === 25)
   );
 
-  // קטגוריה שמערבת חייב ופטור — שלוש כאלה בקטלוג. בלי הסימון היו יוצאות
-  // שתי שורות בשם זהה ובסכומים שונים, שנראות כמו כפילות.
+  // מוצר פטור שאינו פרי — השורה הפטורה לא מתיימרת להיות "פירות"
   const mixedVat = summarizeItems([
     { name: "א", lineTotal: 400, categoryName: "מזון", isVatFree: false },
     { name: "ב", lineTotal: 50, categoryName: "מזון", isVatFree: true },
     { name: "ג", lineTotal: 300, categoryName: "פירות", isVatFree: true },
   ]);
-  check("קטגוריה מעורבת מסומנת", mixedVat.some((r) => r.name === 'ריכוז תעודות משלוח מזון (חייב במע"מ)'));
-  check("ושתי השורות שלה נבדלות", mixedVat.some((r) => r.name === 'ריכוז תעודות משלוח מזון (פטור ממע"מ)'));
+  check("פטור מעורב — שתי שורות", mixedVat.length === 2);
   check(
-    "אבל קטגוריה אחידה באותה חשבונית נשארת נקייה",
-    mixedVat.some((r) => r.name === "ריכוז תעודות משלוח פירות")
+    "והפטורה נקראת פטור ממע\"מ",
+    mixedVat.some((r) => r.name === 'ריכוז תעודות משלוח פטור ממע"מ' && r.lineTotal === 350)
   );
-  check("ואין שתי שורות באותו שם", new Set(mixedVat.map((r) => r.name)).size === mixedVat.length);
   check(
     "הסכום הכולל לא השתנה",
     rolled.reduce((s, r) => s + r.lineTotal, 0) === 140
   );
   check("כמות 1 ומחיר = הסכום, כדי ש-iCount יחשב נכון", rolled.every((r) => r.quantity === 1 && r.unitPrice === r.lineTotal));
 
-  // שורות חייבות ופטורות באותה קטגוריה אינן מתאחדות — איחוד היה מחייב
-  // מע"מ על מה שפטור ממנו
+  // שורות חייבות ופטורות אינן מתאחדות גם באותה קטגוריה — איחוד היה
+  // מחייב מע"מ על מה שפטור ממנו
   const sameCat = summarizeItems([
     { name: "א", lineTotal: 10, categoryName: "מזון", isVatFree: false },
     { name: "ב", lineTotal: 20, categoryName: "מזון", isVatFree: true },
@@ -388,7 +376,7 @@ const cleanup = async () => {
   // בלי מפענח — עדיין שורות תקינות, רק בלי ברקוד. חשבונית חייבת לצאת
   // גם אם המיפוי לא נטען.
   const withoutProducts = summarizeItems(mixedLines);
-  check("בלי מיפוי השורות עדיין נוצרות", withoutProducts.length === 3);
+  check("בלי מיפוי השורות עדיין נוצרות", withoutProducts.length === 2);
   check("ובלי ברקוד", withoutProducts.every((l) => l.barcode === undefined));
   check(
     "והסכומים זהים",
