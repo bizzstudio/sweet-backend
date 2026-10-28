@@ -194,11 +194,11 @@ const cleanup = async () => {
   ];
   const rolled = summarizeItems(mixedLines);
 
-  // בקשה 28/10/2026: הפרדה רק לפי מע"מ — כיבוד (כל החייב) ופירות (הפטור)
+  // בקשה 28/10/2026: הפרדה רק לפי מע"מ — מזון (כל החייב) ופירות (הפטור)
   check("ריכוז מקבץ לשתי שורות — חייב ופטור", rolled.length === 2, `קיבלתי ${rolled.length}`);
   check(
-    "החייב נקרא כיבוד ומאחד מזון עם ח.ניקוי+ח\"פ",
-    rolled.some((r) => r.name === "ריכוז תעודות משלוח כיבוד" && !r.isVatFree && r.lineTotal === 115),
+    "החייב נקרא מזון ומאחד מזון עם ח.ניקוי+ח\"פ",
+    rolled.some((r) => r.name === "ריכוז תעודות משלוח מזון" && !r.isVatFree && r.lineTotal === 115),
     rolled.map((r) => `${r.name}=${r.lineTotal}`).join(" | ")
   );
   check("החייב ראשון", rolled[0].isVatFree === false);
