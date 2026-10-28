@@ -1704,6 +1704,16 @@ const updateCustomer = async (req, res) => {
 
           customer.set("billing.invoiceEmail", invoiceEmail || undefined);
         }
+
+        // מספר הזמנת רכש להדפסה על החשבונית. ריק = ניקוי
+        if (req.body.billing?.purchaseOrderNumber !== undefined) {
+          const raw = req.body.billing.purchaseOrderNumber;
+          if (raw !== null && typeof raw !== "string" && typeof raw !== "number") {
+            return res.status(400).send({ message: "מספר הזמנת רכש אינו תקין." });
+          }
+          const purchaseOrderNumber = String(raw ?? "").trim().slice(0, 100);
+          customer.set("billing.purchaseOrderNumber", purchaseOrderNumber || undefined);
+        }
       }
 
       const updatedUser = await customer.save();
