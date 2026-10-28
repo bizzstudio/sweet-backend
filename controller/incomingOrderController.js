@@ -863,11 +863,10 @@ const getItemCandidates = async (req, res) => {
             scope: existing.scope,
             // אליאס של כמה מוצרים — כדי שמסך "כמה מוצרים" ייפתח על הרשימה
             // השמורה, ושינוי (למשל החלפת מוצר שאזל) לא יתחיל מדף ריק
-            products: (existing.products || []).map(({ product, quantity }) => ({
+            products: (existing.products || []).map(({ product }) => ({
               productId: product._id,
               sku: product.sku || null,
               title: product.title?.he || product.title?.en || "",
-              quantity: quantity ?? null,
             })),
           }
         : null,
@@ -885,8 +884,8 @@ const getItemCandidates = async (req, res) => {
  * ‏sku במקום productId: הבורר במסך מחפש בכל הקטלוג מתוך הרשימה הרזה
  * (/products/lite), ושם המזהה של מוצר הוא המק"ט.
  *
- * ‏products — ‎[{ productId | sku, quantity }]‎: השורה היא כמה מוצרים ("סכו"ם
- * וצלחות" → מזלגות, סכינים, כפות, צלחות). ‏quantity ריק = כמו בשורה. ראה
+ * ‏products — ‎[{ productId | sku }]‎: השורה היא כמה מוצרים ("סכו"ם
+ * וצלחות" → מזלגות, סכינים, כפות, צלחות), כל אחד בכמות שבשורה. ראה
  * models/ProductAlias.
  *
  * "זה המוצר שהתכוונו אליו" — שומר את ההכרעה ומחזיר אותה.

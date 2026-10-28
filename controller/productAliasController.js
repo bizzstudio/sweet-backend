@@ -37,13 +37,12 @@ const toView = (alias, byId) => ({
   lastUsedAt: alias.lastUsedAt || null,
   createdBy: alias.createdBy || null,
   updatedAt: alias.updatedAt || null,
-  products: aliasEntries(alias).map(({ product, quantity }) => {
+  products: aliasEntries(alias).map(({ product }) => {
     const full = byId.get(String(product));
     return {
       productId: product,
       sku: full?.sku || null,
       title: full?.title?.he || full?.title?.en || "",
-      quantity,
       // ‏missing: מוצר שנמחק מהקטלוג. הקליטה מתעלמת אז מהאליאס כולו (ראה
       // findAliasMatch), ומי שמסתכל כאן צריך לדעת שזו הסיבה שהשורה נעצרת
       missing: !full,
@@ -88,9 +87,9 @@ const getCustomerAliases = async (req, res) => {
 
 /**
  * PUT /api/product-aliases/:id
- * body: { products: [{ productId | sku, quantity }] }
+ * body: { products: [{ productId | sku }] }
  *
- * מחליף את רשימת המוצרים של האליאס. ‏quantity ריק = כמו בשורה.
+ * מחליף את רשימת המוצרים של האליאס. כל מוצר נכנס בכמות שבשורה.
  */
 const updateAlias = async (req, res) => {
   try {

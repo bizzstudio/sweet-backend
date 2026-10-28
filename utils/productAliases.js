@@ -264,7 +264,7 @@ const productIdBySku = async (sku) => {
 };
 
 /**
- * רשימת מוצרים מהמסך ‎[{ productId | sku, quantity }]‎ → ‎[{ productId, quantity }]‎.
+ * רשימת מוצרים מהמסך ‎[{ productId | sku }]‎ → ‎[{ productId }]‎.
  * משותף למסך ההזמנה (resolve-item) ולכרטיס הלקוח (controller/productAliasController).
  */
 const resolveProductList = async (list) => {
@@ -275,7 +275,7 @@ const resolveProductList = async (list) => {
   for (const entry of list) {
     const productId = entry?.productId || (entry?.sku ? await productIdBySku(entry.sku) : null);
     if (!productId) throw new Error("לא נבחר מוצר");
-    out.push({ productId, quantity: entry?.quantity ?? null });
+    out.push({ productId });
   }
   return out;
 };
