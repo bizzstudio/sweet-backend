@@ -389,6 +389,40 @@ const many = names(
 );
 check("מעל התקרה: שורה עם כמות או קרטון אינה נזרקת", many.slice(-2), ["מים מינרלים - 2 שישיות (12 יח')", "צלחות גדולות - קרטון"]);
 
+section("גיליון: רשימה קבועה שממולאת חלקית (202420)");
+
+// הרשימה הקבועה של הלקוחה: ממלאת כמות רק במה שהיא רוצה. תאים ריקים זזו
+// עמודה, והמחיר או הסכום נקראו ככמות.
+const weeklySheet = parseOrderText({
+  channel: "email",
+  sender: { email: "lea@example.com" },
+  text: [
+    "Lea Jeni",
+    "Novolog Logistics",
+    "HaMaayan Street 55",
+    ", 717131",
+    "Israel",
+    "novologlogistics.co.il",
+    "Chat with me on Teams",
+    "",
+    "--- קובץ מצורף: מתוקייה.xlsx ---",
+    "--- גיליון: 04.01.21 ---",
+    "שם המוצר\tמחיר\t28.10.26\t\"סה\"\"כ עלות הזמנה\"",
+    "סוכר 1 ק\"ג\t₪ 4.20\t10\t₪ 42.00",
+    "נוטלה 350 גרם\t₪ 13.50\t8\t₪ 108.00",
+    "שוקולד שחר 500 פרווה\t₪ 13.50\t\t₪ 0.00",
+    "חלב דל לקטוז   - רק אדום של תנובה !\t7.5\t6\t\tרק של תנובה",
+    "\"סוכריות חמוצות בטעם פירות 1 ק\"\"ג\"\t₪ 29.00",
+  ].join("\n"),
+});
+const sheetQty = Object.fromEntries((weeklySheet.items || []).map((i) => [i.rawName.slice(0, 12), i.quantity]));
+check("גיליון: רק השורות שמולאו", Object.keys(sheetQty).length, 3);
+check("גיליון: תא ריק אינו יחידה אחת", "שוקולד שחר " in sheetQty, false);
+check("גיליון: מחיר בשורה קצרה אינו כמות", Object.keys(sheetQty).some((k) => k.includes("סוכריות")), false);
+check("גיליון: שלושה רווחים בתוך תא אינם גבול עמודה", sheetQty["חלב דל לקטוז"], 6);
+check("גיליון: כותרת עם תאריך אינה מוצר", Object.keys(sheetQty).some((k) => k.startsWith("שם המוצר")), false);
+check("גיליון: חתימה באנגלית וסימוני הקובץ אינם הערה", weeklySheet.note, null);
+
 // ───────────────────────────────────────────────────────────────
 
 console.log(`\n${"─".repeat(50)}`);
