@@ -18,7 +18,7 @@ const mongoose = require("mongoose");
 
 const Product = require("../models/Product");
 const ProductAlias = require("../models/ProductAlias");
-const { saveAlias } = require("../utils/productAliases");
+const { aliasKey, saveAlias, updateAliasProducts } = require("../utils/productAliases");
 const { resolveItems } = require("../lib/order-ingestion/resolvers");
 
 let passed = 0;
@@ -40,6 +40,9 @@ const section = (title) => console.log(`\n── ${title} ──`);
 // ההתאמה מצא לו בקטלוג את "בדיקת קורונה" לפי המילה "בדיקת" — כלומר הבדיקה
 // מדדה את מנוע ההתאמה במקום את האליאס. שם ללא אף מילה אמיתית מבודד אותה.
 const TEST_NAME = "קסדרלימ טרפוזין ולכביצי";
+// שורה שנפרשת לכמה מוצרים, ושורה שנשמרה בצורה הישנה (מוצר אחד בלבד)
+const TEST_NAME_MULTI = "גרטפולין זמקורית ושפלנדים";
+const TEST_NAME_OLD = "פלוזרית קמנדולי";
 
 const resolveOne = (rawName, customerId) =>
   resolveItems([{ rawName, quantity: 3 }], { customerId });
@@ -146,6 +149,73 @@ const describe = (result) => {
       "לא זוהה"
     );
     await Product.updateOne({ _id: productA._id }, { $set: { stock: productA.stock } });
+
+    // ── שורה אחת, כמה מוצרים ──
+    //
+    // "חד פעמי סכו"ם וצלחות" → מזלגות, סכינים, כפות, צלחות. הכמות של כל מוצר
+    // היא זו שבשורה, אלא אם נקבעה לו כמות משלו.
+    section("אליאס של כמה מוצרים");
+    await saveAlias({
+      rawName: TEST_NAME_MULTI,
+      customerId: customer,
+      products: [{ productId: productA._id }, { productId: productB._id, quantity: 2 }],
+    });
+    const multi = await resolveOne(TEST_NAME_MULTI, customer);
+    check(
+      "השורה נפרשת לשני פריטים",
+      multi.items.map((item) => item.product.title?.he).join(" + "),
+      `${productA.title?.he} + ${productB.title?.he}`
+    );
+    check(
+      "בלי כמות משלו — הכמות של השורה; עם כמות — שלו",
+      multi.items.map((item) => item.quantity).join(","),
+      "3,2"
+    );
+    check("שום דבר לא נשאר לאדם", multi.unmatched.length, 0);
+    check(
+      "רשומה אחת, המוצר הראשון גם בשדה הישן",
+      String((await ProductAlias.findOne({ customer, key: aliasKey(TEST_NAME_MULTI) }).lean()).product),
+      String(productA._id)
+    );
+
+    section("מוצר אחד שאזל עוצר את כל השורה");
+    await Product.updateOne({ _id: productB._id }, { $set: { stock: 0 } });
+    const blocked = await resolveOne(TEST_NAME_MULTI, customer);
+    check("אף פריט לא נכנס חלקית", blocked.items.length, 0);
+    check("השורה נעצרת עם כל המוצרים כהצעה", blocked.unmatched[0]?.suggestions?.length, 2);
+    await Product.updateOne({ _id: productB._id }, { $set: { stock: productB.stock } });
+
+    // ‏עריכה מכרטיס הלקוח: הוספה/הסרה של מוצר, בלי לאפס את מונה השימושים
+    section("עריכה מכרטיס הלקוח");
+    const saved = await ProductAlias.findOne({ customer, key: aliasKey(TEST_NAME_MULTI) }).lean();
+    const hitsBefore = (await ProductAlias.findById(saved._id).lean()).hits;
+    await updateAliasProducts(saved._id, [{ productId: productB._id, quantity: 5 }]);
+    const edited = await resolveOne(TEST_NAME_MULTI, customer);
+    check(
+      "אחרי הסרת מוצר — המוצר שנשאר, בכמות שנקבעה לו",
+      edited.items.map((item) => `${item.product.title?.he} ×${item.quantity}`).join(" + "),
+      `${productB.title?.he} ×5`
+    );
+    check(
+      "מונה השימושים לא התאפס בעריכה",
+      (await ProductAlias.findById(saved._id).lean()).hits >= hitsBefore,
+      true
+    );
+
+    // ── רשומה מלפני השינוי: רק `product`, בלי `products` ──
+    section("אליאס ישן (מוצר אחד, בלי רשימה)");
+    await ProductAlias.collection.insertOne({
+      key: aliasKey(TEST_NAME_OLD),
+      customer,
+      product: productA._id,
+      ignore: false,
+      hits: 0,
+    });
+    check(
+      "ממשיך לעבוד כמו קודם",
+      describe(await resolveOne(TEST_NAME_OLD, customer)),
+      `${productA.title?.he} [alias(לקוח)]`
+    );
   } finally {
     // הניקוי ב-finally: בדיקה שנכשלה באמצע אסור שתשאיר אליאסים במסד אמיתי
     await ProductAlias.deleteMany({ _id: { $in: created } });

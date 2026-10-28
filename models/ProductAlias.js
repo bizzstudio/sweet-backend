@@ -41,7 +41,11 @@ const productAliasSchema = new mongoose.Schema(
       default: null,
     },
 
-    // ריק כשההכרעה היא "זו אינה שורת מוצר" (ignore)
+    // ריק כשההכרעה היא "זו אינה שורת מוצר" (ignore).
+    //
+    // באליאס של כמה מוצרים זה תמיד המוצר הראשון ברשימה `products`. השדה
+    // נשמר מלא גם אז כדי שכל קוד שקורא רק אותו (רשומות שנשמרו לפני שהיו כמה
+    // מוצרים, האינדקס "כל האליאסים של מוצר") ימשיך לראות מוצר אמיתי.
     product: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Product",
@@ -49,6 +53,29 @@ const productAliasSchema = new mongoose.Schema(
         return !this.ignore;
       },
       default: null,
+    },
+
+    // ── שורה אחת של הלקוח, כמה מוצרים בקטלוג ──
+    //
+    // לקוח כותב "חד פעמי סכו"ם וצלחות", ובקטלוג אין מוצר כזה — יש מזלגות,
+    // סכינים, כפות, צלחות גדולות וצלחות קטנות. ההכרעה האנושית כאן אינה "איזה
+    // מוצר" אלא "אילו מוצרים", והקליטה פורשת את השורה לכל אחד מהם.
+    //
+    // ‏quantity: null = "כמו בשורה" — הכמות שהלקוח כתב בהזמנה הנוכחית. זו
+    // ברירת המחדל, כי מי שכותב "סכו"ם 3" מתכוון בדרך כלל ל-3 מכל אחד. מספר
+    // = כמות קבועה למוצר הזה, בלי קשר למה שנכתב בשורה ("צלחות גדולות — תמיד 1").
+    //
+    // רשומות ישנות לא מחזיקות את השדה כלל (רק `product`). כל קריאה עוברת דרך
+    // aliasEntries ב-utils/productAliases, שמתייחסת לשתי הצורות כאחת.
+    products: {
+      type: [
+        {
+          product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+          quantity: { type: Number, default: null, min: 0 },
+          _id: false,
+        },
+      ],
+      default: undefined,
     },
 
     // "זו אינה שורת מוצר": כותרת, שאלה, שם של עובד. השורה יורדת להערת ההזמנה
@@ -82,6 +109,10 @@ productAliasSchema.index({ key: 1, customer: 1 }, { unique: true });
 
 // שליפת כל האליאסים של מוצר — נדרש כשמוצר נמחק או מוחלף
 productAliasSchema.index({ product: 1 });
+productAliasSchema.index({ "products.product": 1 });
+
+// רשימת האליאסים של לקוח — לכרטיס הלקוח (ראה controller/productAliasController)
+productAliasSchema.index({ customer: 1, updatedAt: -1 });
 
 const ProductAlias = mongoose.model("ProductAlias", productAliasSchema);
 

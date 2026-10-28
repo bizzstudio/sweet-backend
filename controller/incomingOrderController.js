@@ -39,7 +39,12 @@ const {
   CANDIDATE_POOL_SIZE,
   HISTORY_CANDIDATE_LIMIT,
 } = require("../utils/productMatching");
-const { findAliasMatch, saveAlias } = require("../utils/productAliases");
+const {
+  findAliasMatch,
+  saveAlias,
+  productIdBySku,
+  resolveProductList,
+} = require("../utils/productAliases");
 const { getCustomerPurchaseProfile } = require("../utils/customerPurchaseHistory");
 const { canonicalWords } = require("../utils/orderWording");
 const { extractQualifiers } = require("../lib/order-ingestion/qualifiers");
@@ -492,6 +497,21 @@ const ignoreIncomingOrder = async (req, res) => {
 };
 
 /**
+ * האם הפעולה ממסך הזמנת השגיאה מבקשת להפיק תעודת משלוח (ברירת המחדל: כן).
+ *
+ * ‏false רק כשנשלח במפורש. המנהלת מתקנת הזמנות כאלה לפעמים רק כדי שיהיו
+ * נכונות, והתעודה — שגם נשלחת מיד למדפסת — יצאה לה בכל לחיצה. השאר נשאר
+ * כמו שהיה: גוף ריק, מסך ישן או קריאה מסקריפט מפיקים תעודה כרגיל, וכך זרימת
+ * "על כל הזמנה יוצאת תעודה" אינה נשברת בשקט אצל אף קורא.
+ */
+const wantsDeliveryNote = (req) => req.body?.issueDeliveryNote !== false;
+
+// השורה שמוסיפים להודעת ההצלחה כשהתעודה נדחתה, כדי שמי שלחצה תדע איפה
+// היא מפיקה אותה כשתרצה
+const NOTE_DEFERRED_MESSAGE =
+  "תעודת משלוח לא הופקה — אפשר להפיק אותה בכל עת מכרטיס התעודה במסך ההזמנה.";
+
+/**
  * POST /api/incoming-orders/order/:orderId/approve
  *
  * אישור הזמנה שנכנסה ב"שגיאה בקריאה", אחרי שאדם בדק והשלים אותה.
@@ -504,6 +524,7 @@ const ignoreIncomingOrder = async (req, res) => {
 const approveErrorOrder = async (req, res) => {
   try {
     const approvedBy = adminDisplayName(req.user);
+    const issueDeliveryNote = wantsDeliveryNote(req);
 
     const order = await Order.findById(req.params.orderId).populate("status");
     if (!order) {
@@ -594,6 +615,7 @@ const approveErrorOrder = async (req, res) => {
       to: "Processing",
       functionName: `approveErrorOrder:${approvedBy}`,
       order: claimed,
+      issueDeliveryNote,
     });
 
     // הורדת מלאי — לא נעשתה ביצירת הזמנת השגיאה.
@@ -630,8 +652,11 @@ const approveErrorOrder = async (req, res) => {
     }
 
     res.send({
-      message: `הזמנה ${claimed.invoice} אושרה והועברה לבטיפול. המלאי עודכן.`,
+      message:
+        `הזמנה ${claimed.invoice} אושרה והועברה לבטיפול. המלאי עודכן.` +
+        (issueDeliveryNote ? "" : ` ${NOTE_DEFERRED_MESSAGE}`),
       order: claimed,
+      issueDeliveryNote,
     });
   } catch (err) {
     console.log("approveErrorOrder error: ", err);
@@ -659,12 +684,13 @@ const retryFromOrder = async (req, res) => {
         .send({ message: "ההזמנה לא נוצרה מהודעה נכנסת — אין מה להריץ שוב" });
     }
 
-    const doc = await reprocess(order.incomingOrder);
+    const issueDeliveryNote = wantsDeliveryNote(req);
+    const doc = await reprocess(order.incomingOrder, { issueDeliveryNote });
 
     res.send({
       message:
         doc.status === "order_created"
-          ? `נוצרה הזמנה ${doc.invoice}`
+          ? `נוצרה הזמנה ${doc.invoice}` + (issueDeliveryNote ? "" : `. ${NOTE_DEFERRED_MESSAGE}`)
           : `העיבוד הסתיים בסטטוס "${doc.status}"${doc.invoice ? ` (הזמנה ${doc.invoice})` : ""}`,
       incomingOrder: doc,
       newOrderId: doc.order,
@@ -835,6 +861,14 @@ const getItemCandidates = async (req, res) => {
             title: existing.ignore ? null : existing.product.title?.he,
             ignore: Boolean(existing.ignore),
             scope: existing.scope,
+            // אליאס של כמה מוצרים — כדי שמסך "כמה מוצרים" ייפתח על הרשימה
+            // השמורה, ושינוי (למשל החלפת מוצר שאזל) לא יתחיל מדף ריק
+            products: (existing.products || []).map(({ product, quantity }) => ({
+              productId: product._id,
+              sku: product.sku || null,
+              title: product.title?.he || product.title?.en || "",
+              quantity: quantity ?? null,
+            })),
           }
         : null,
     });
@@ -846,10 +880,14 @@ const getItemCandidates = async (req, res) => {
 
 /**
  * POST /api/incoming-orders/order/:orderId/resolve-item
- * body: { rawName, productId | sku, scope: "customer" | "global" }
+ * body: { rawName, productId | sku | products, scope: "customer" | "global" }
  *
  * ‏sku במקום productId: הבורר במסך מחפש בכל הקטלוג מתוך הרשימה הרזה
  * (/products/lite), ושם המזהה של מוצר הוא המק"ט.
+ *
+ * ‏products — ‎[{ productId | sku, quantity }]‎: השורה היא כמה מוצרים ("סכו"ם
+ * וצלחות" → מזלגות, סכינים, כפות, צלחות). ‏quantity ריק = כמו בשורה. ראה
+ * models/ProductAlias.
  *
  * "זה המוצר שהתכוונו אליו" — שומר את ההכרעה ומחזיר אותה.
  *
@@ -865,20 +903,15 @@ const resolveItemAlias = async (req, res) => {
     const { rawName, sku, scope = "customer", ignore = false } = req.body || {};
     let { productId } = req.body || {};
     if (!rawName) return res.status(400).send({ message: "חסר שם הפריט" });
-    if (!productId && !sku && !ignore) return res.status(400).send({ message: "לא נבחר מוצר" });
 
-    // מק"ט שמופיע ביותר ממוצר אחד אינו מכריע — לא בוחרים אחד מהם בשקט
-    if (!ignore && !productId) {
-      const bySku = await Product.find({ sku: String(sku) }).select("_id").limit(2).lean();
-      if (bySku.length !== 1) {
-        return res.status(400).send({
-          message: bySku.length
-            ? `המק"ט ${sku} שייך ליותר ממוצר אחד בקטלוג — יש לתקן בקטלוג`
-            : `לא נמצא מוצר עם מק"ט ${sku}`,
-        });
-      }
-      productId = bySku[0]._id;
+    // ‏products נבדק לפני productId/sku: הוא הבחירה המפורשת יותר, ומסך שישלח
+    // את שניהם התכוון לרשימה
+    const products = ignore ? [] : await resolveProductList(req.body?.products);
+    if (!productId && !sku && !ignore && !products.length) {
+      return res.status(400).send({ message: "לא נבחר מוצר" });
     }
+
+    if (!ignore && !products.length && !productId) productId = await productIdBySku(sku);
 
     // ── ההיקף נבדק במפורש ולא נגזר מ"כל מה שאינו global" ──
     //
@@ -904,6 +937,7 @@ const resolveItemAlias = async (req, res) => {
     const alias = await saveAlias({
       rawName: searchName,
       productId: ignore ? null : productId,
+      products: products.length ? products : null,
       ignore: Boolean(ignore),
       customerId: scope === "global" ? null : order.user,
       // ‏adminDisplayName ולא req.user.name: השם בסכמה הוא אובייקט ({he,en}),
@@ -921,13 +955,15 @@ const resolveItemAlias = async (req, res) => {
       });
     }
 
-    const product = await Product.findById(productId).select("title sku").lean();
+    const product = await Product.findById(alias.product).select("title sku").lean();
+    const target =
+      products.length > 1 ? `${products.length} מוצרים` : `"${product?.title?.he}"`;
 
     res.send({
       message:
         scope === "global"
-          ? `מעכשיו "${searchName}" ייקרא כ-"${product?.title?.he}" אצל כל הלקוחות`
-          : `מעכשיו "${searchName}" ייקרא כ-"${product?.title?.he}" אצל הלקוח הזה`,
+          ? `מעכשיו "${searchName}" ייקרא כ-${target} אצל כל הלקוחות`
+          : `מעכשיו "${searchName}" ייקרא כ-${target} אצל הלקוח הזה`,
       alias,
     });
   } catch (err) {

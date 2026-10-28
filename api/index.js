@@ -12,6 +12,7 @@ const customerRoutes = require("../routes/customerRoutes");
 const customerPriceListRoutes = require("../routes/customerPriceListRoutes");
 const groupPriceListRoutes = require("../routes/groupPriceListRoutes");
 const customerHistoryRoutes = require("../routes/customerHistoryRoutes");
+const productAliasRoutes = require("../routes/productAliasRoutes");
 const adminRoutes = require("../routes/adminRoutes");
 const orderRoutes = require("../routes/orderRoutes");
 const appOrderRoutes = require("../routes/appOrderRoutes");
@@ -113,6 +114,8 @@ app.use("/api/customer-price-list/", customerPriceListRoutes);
 // מחירונים קבוצתיים — מחירון אחד לכמה לקוחות, גובר על המחירון הפרטי
 app.use("/api/group-price-list/", groupPriceListRoutes);
 app.use("/api/customer-history/", customerHistoryRoutes);
+// "איך הלקוח קורא למוצרים" — עריכת ההכרעות שנשמרו, מכרטיס הלקוח
+app.use("/api/product-aliases/", productAliasRoutes);
 app.use("/api/order/", customerOrderRoutes);
 app.use("/api/cashier-orders/", cashierOrderRoutes);
 app.use("/api/attributes/", attributeRoutes);
