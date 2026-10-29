@@ -1584,6 +1584,40 @@ const issueCreditNoteInvoice = async (req, res) => {
   }
 };
 
+/** התעודות הפתוחות לפי לקוח — התצוגה המקדימה של החשבונית המרוכזת. */
+const previewConsolidatedCredit = async (req, res) => {
+  try {
+    res.send(await creditNotes.consolidatedPreview());
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/**
+ * חשבונית זיכוי מרוכזת ללקוח אחד. המסך קורא לזה לקוח אחרי לקוח, ולא
+ * בקשה אחת לכולם: עשרות הפקות ב-iCount בבקשה אחת עוברות את זמן ההמתנה
+ * של השרת, והמסך לא יודע מה הופק ומה לא.
+ */
+const issueConsolidatedCredit = async (req, res) => {
+  try {
+    if (!isValidId(req.params.customerId)) {
+      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
+    }
+    const issued = await creditNotes.issueConsolidated({
+      customerId: req.params.customerId,
+      noteIds: req.body?.noteIds,
+      emailDocument:
+        typeof req.body?.emailDocument === "boolean" ? req.body.emailDocument : undefined,
+    });
+    res.send({
+      message: `חשבונית זיכוי ${issued.creditDocNum} הופקה על ${issued.notes.length} תעודות זיכוי`,
+      ...issued,
+    });
+  } catch (err) {
+    res.status(400).send({ message: err.message });
+  }
+};
+
 const cancelCreditNote = async (req, res) => {
   try {
     if (!isValidId(req.params.id)) {
@@ -2088,6 +2122,8 @@ module.exports = {
   getCreditNotes,
   getCreditNote,
   issueCreditNoteInvoice,
+  previewConsolidatedCredit,
+  issueConsolidatedCredit,
   cancelCreditNote,
   getCustomerOpenInvoices,
   getCustomerDocuments,

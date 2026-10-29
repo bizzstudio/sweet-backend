@@ -90,6 +90,14 @@ router.post("/credit-notes/preview", isAdmin, billingController.previewCreditNot
 router.get("/credit-notes", isAdmin, billingController.getCreditNotes);
 // issueInvoice:true בגוף הבקשה = תעודה + חשבונית זיכוי מיד
 router.post("/credit-notes", isAdmin, billingController.createCreditNote);
+// חשבונית זיכוי מרוכזת: אחת לכל לקוח על כל התעודות הפתוחות שלו.
+// לפני /credit-notes/:id, אחרת "consolidated" נתפס כמזהה תעודה
+router.get("/credit-notes/consolidated", isAdmin, billingController.previewConsolidatedCredit);
+router.post(
+  "/credit-notes/consolidated/:customerId",
+  isAdmin,
+  billingController.issueConsolidatedCredit
+);
 router.get("/credit-notes/:id", isAdmin, billingController.getCreditNote);
 router.post("/credit-notes/:id/invoice", isAdmin, billingController.issueCreditNoteInvoice);
 router.patch("/credit-notes/:id/cancel", isAdmin, billingController.cancelCreditNote);
