@@ -38,7 +38,7 @@ const {
   manualNoteCategoryIds,
   clearCache: clearManualCache,
 } = require("../lib/billing/manualItems");
-const { groupIntoInvoices, summarizeItems, mergeProductLines, shouldMergeProducts, shouldSummarize, invoiceRemarks, previousMonth, isLastDayOfMonth, releaseStuckClaims, closeMonth, billNoteImmediately } = require("../lib/billing/monthlyBilling");
+const { groupIntoInvoices, summarizeItems, mergeProductLines, shouldMergeProducts, shouldSummarize, invoiceRemarks, withPurchaseOrder, withTypedRemarks, capDescription, previousMonth, isLastDayOfMonth, releaseStuckClaims, closeMonth, billNoteImmediately } = require("../lib/billing/monthlyBilling");
 const { isNoteTriggerStatus } = require("../lib/billing/autoDeliveryNote");
 const { reissueInvoice } = require("../lib/billing/reissue");
 const { dueDateFor, forCustomer } = require("../lib/billing/paymentTerms");
@@ -403,6 +403,19 @@ const cleanup = async () => {
   );
   const long = invoiceRemarks([{ number: 1, notes: "x".repeat(5000) }]);
   check("טקסט ארוך נחתך לגבול של iCount", long.length === 2000 && long.endsWith("…"));
+
+  // הערה שהוקלדה בסגירת החודש (29/10/2026): אחרי שורת הרכש, לפני הערות
+  // התעודות; החיתוך על הטקסט המלא
+  const fullText = (c, typed, notes) =>
+    capDescription(withPurchaseOrder(c, withTypedRemarks(typed, notes)));
+  const po = { billing: { purchaseOrderNumber: "77" } };
+  check("הערה ריקה — אין טקסט", fullText({}, "   ", undefined) === undefined);
+  check(
+    "סדר: רכש, הערה מוקלדת, הערות התעודות",
+    fullText(po, " כיבוד ", "קומה 22") === "מספר הזמנת רכש: 77\nכיבוד\nקומה 22"
+  );
+  const capped = fullText(po, "y".repeat(500), long);
+  check("החיתוך כולל את שורת הרכש", capped.length === 2000 && capped.startsWith("מספר הזמנת רכש: 77"));
 
   // הסכום שהקבוצה שולחת ל-iCount = מה שמודפס על התעודות (שורות + משלוח - הנחה)
   const withExtras = [

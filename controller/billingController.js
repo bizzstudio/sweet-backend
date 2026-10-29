@@ -703,6 +703,11 @@ const closeMessage = (result, noteIds) => {
   return `חודש ${result.month} נסגר — ${result.invoicesCreated} חשבוניות ל-${result.customersProcessed} לקוחות`;
 };
 
+// גבול ההערה המוקלדת במסך הסגירה. השרת חותך ממילא את הטקסט כולו
+// (כולל מספר הרכש והערות התעודות) ב-2,000 תווים; כאן — כדי שהערה ארוכה
+// תיחסם עם הודעה לפני ההפקה ולא תיחתך בשקט על החשבונית.
+const MAX_INVOICE_REMARKS = 500;
+
 /**
  * סגירת חודש בפועל — מפיק חשבוניות מס ב-iCount.
  *
@@ -731,6 +736,18 @@ const closeMonth = async (req, res) => {
         .send({ message: "בחירת תעודות ספציפיות אפשרית רק כשנבחר לקוח בודד" });
     }
 
+    // הערה שמודפסת על החשבונית (hwc). רק ללקוח בודד.
+    const remarks =
+      typeof req.body.remarks === "string" ? req.body.remarks.trim() : "";
+    if (remarks.length > MAX_INVOICE_REMARKS) {
+      return res
+        .status(400)
+        .send({ message: `ההערה לחשבונית ארוכה מדי (עד ${MAX_INVOICE_REMARKS} תווים)` });
+    }
+    if (remarks && !req.body.customer) {
+      return res.status(400).send({ message: "הערה לחשבונית אפשרית רק כשנבחר לקוח בודד" });
+    }
+
     // תעודות שנתקעו מריצה קודמת שקרסה — משחררים לפני שמתחילים, אחרת הן
     // לא ייכללו בחיוב וייפלו בין הכסאות.
     await monthlyBilling.releaseStuckClaims();
@@ -739,6 +756,7 @@ const closeMonth = async (req, res) => {
       month: req.body.month,
       customerId: req.body.customer,
       noteIds,
+      remarks: remarks || undefined,
       // רק בוליאני מפורש מהבקשה גובר על המדיניות. body בלי השדה חייב
       // להישאר undefined ולא false — אחרת כל לחיצה במסך הייתה מבטלת בשקט
       // את השליחה האוטומטית ללקוח.
