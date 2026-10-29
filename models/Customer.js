@@ -115,6 +115,11 @@ const CustomerBillingSchema = new mongoose.Schema(
     // splitInvoiceByCategory דלוק, הוא גובר.
     separateDisposablesInvoice: { type: Boolean, default: false },
 
+    // אותו פיצול לפירות (בקשה 29/10/2026): חשבונית לתעודות שרובן פירות,
+    // וחשבונית לכל השאר — כיבוד וחד פעמי יחד. עם separateDisposablesInvoice
+    // — שלוש חשבוניות.
+    separateFruitInvoice: { type: Boolean, default: false },
+
     // אחוז הנחה קבוע שסוכם עם הלקוח, ויורד מכל מסמך שמופק לו — תעודת
     // משלוח, הצעת מחיר והחשבונית החודשית.
     //
