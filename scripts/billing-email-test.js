@@ -25,6 +25,10 @@ let customerEmail = "";
 let calls = [];
 const lastCall = () => calls[calls.length - 1];
 const lastParams = () => lastCall()?.params || {};
+// מסמך נשלח במייל בקריאה נפרדת ל-doc/email אחרי ההפקה
+const createParams = () => calls.filter((c) => c.endpoint === "doc/create").pop()?.params || {};
+const emailCall = () => calls.find((c) => c.endpoint === "doc/email");
+const sentFlag = () => (emailCall() ? 1 : 0);
 // כשהוא מוגדר, הקריאה הבאה ל-iCount נכשלת — כך נבדקים מסלולי הכשלון
 let failNext = null;
 
@@ -40,6 +44,7 @@ require.cache[clientPath].exports.call = async (endpoint, params) => {
   }
   if (endpoint === "client/create") return { client_id: "NEW-1" };
   if (endpoint === "client/update") return {};
+  if (endpoint === "doc/email") return { email_status: { [params.email_to]: true } };
   return { docnum: "TEST-1", doc_url: "https://example.test/doc" };
 };
 
@@ -86,15 +91,45 @@ const issue = async ({ email, envFlag, emailDocument }) => {
   else process.env.BILLING_EMAIL_DOCUMENTS = envFlag;
 
   const doc = await createInvoice({ customerId: "x", items: ITEMS, emailDocument });
-  return { doc, sent: lastParams().email_document, emailedTo: doc.emailedTo };
+  return { doc, sent: sentFlag(), emailedTo: doc.emailedTo };
 };
 
 const run = async () => {
   group("ברירת המחדל — שליחה");
   {
     const r = await issue({ email: "lakoach@example.co.il" });
-    check("email_document=1 בלי שאיש ביקש", r.sent === 1, `התקבל ${r.sent}`);
+    check("doc/email בלי שאיש ביקש", r.sent === 1, `התקבל ${r.sent}`);
     check("הכתובת מדווחת חזרה", r.emailedTo === "lakoach@example.co.il");
+    check(
+      "doc/create בלי פרמטר שליחה (email_document נבלע ב-iCount)",
+      !("email_document" in createParams()) && !("send_email" in createParams())
+    );
+    check(
+      "doc/email על המסמך שהופק, מקור",
+      emailCall()?.params.docnum === "TEST-1" && emailCall()?.params.orig === true
+    );
+  }
+
+  group("שליחה שנכשלה — המסמך קיים, emailedTo ריק");
+  {
+    customerEmail = "lakoach@example.co.il";
+    calls = [];
+    const realPush = calls.push;
+    // הקריאה השנייה (doc/email) נכשלת; doc/create מצליחה
+    calls.push = function (c) {
+      if (c.endpoint === "doc/email") failNext = "SMTP down";
+      return realPush.call(this, c);
+    };
+    let threw = false;
+    let doc;
+    try {
+      doc = await createInvoice({ customerId: "x", items: ITEMS });
+    } catch {
+      threw = true;
+    }
+    check("כשלון בשליחה אינו זורק", !threw);
+    check("emailedTo = null ו-emailError מלא", doc?.emailedTo === null && /SMTP/.test(doc?.emailError || ""));
+    check("מספר המסמך חוזר", doc?.docNum === "TEST-1");
   }
 
   group("כתובות שאי אפשר לשלוח אליהן");
@@ -141,17 +176,17 @@ const run = async () => {
     delete process.env.BILLING_EMAIL_DOCUMENTS;
     customerEmail = "lakoach@example.co.il";
     const receipt = await createReceipt({ customerId: "x", amount: 100, method: "transfer" });
-    check("קבלה נשלחת גם היא", lastParams().email_document === 1);
-    check("doctype נשמר", lastParams().doctype === "receipt");
-    check("client_id נשלח", lastParams().client_id === "9999");
+    check("קבלה נשלחת גם היא", sentFlag() === 1 && emailCall().params.email_to === "lakoach@example.co.il");
+    check("doctype נשמר", createParams().doctype === "receipt");
+    check("client_id נשלח", createParams().client_id === "9999");
     check("הקבלה מדווחת את הכתובת", receipt.emailedTo === "lakoach@example.co.il");
 
     // הקבלה אינה נושאת מע"מ. פרמטר מע"מ שנוסף לה "בדרך" הוא שינוי לא מאומת
     // במסמך מס קיים, ולכן נבדק במפורש שהוא אינו שם.
     check(
       "price_includes_vat אינו נשלח בקבלה",
-      !("price_includes_vat" in lastParams()),
-      `נשלח ${lastParams().price_includes_vat}`
+      !("price_includes_vat" in createParams()),
+      `נשלח ${createParams().price_includes_vat}`
     );
   }
 
@@ -159,7 +194,7 @@ const run = async () => {
   {
     customerEmail = "lakoach@example.co.il";
     await createInvoice({ customerId: "x", items: ITEMS, description: "תיאור", discount: 5 });
-    const p = lastParams();
+    const p = createParams();
     check("price_includes_vat=0 נשמר בחשבונית", p.price_includes_vat === 0);
     check("מטבע ושפה נשמרו", p.currency_code === "ILS" && p.lang === "he");
     check("doctype נשמר", p.doctype === "invoice");
@@ -189,15 +224,15 @@ const run = async () => {
     await createInvoice({ customerId: "x", items: ITEMS });
     check(
       "client_address נושא כתובת, איש קשר וטלפון",
-      lastParams().client_address === "הנציב 32, תל אביב, איש קשר: ענת · טלפון: 054-7205887",
-      lastParams().client_address
+      createParams().client_address === "הנציב 32, תל אביב, איש קשר: ענת · טלפון: 054-7205887",
+      createParams().client_address
     );
     await createReceipt({ customerId: "x", amount: 50 });
-    check("גם בקבלה", lastParams().client_address?.startsWith("הנציב 32"));
+    check("גם בקבלה", createParams().client_address?.startsWith("הנציב 32"));
 
     clientDetails = { address: "", contactLine: "" };
     await createInvoice({ customerId: "x", items: ITEMS });
-    check("בלי פרטים — client_address לא נשלח", !("client_address" in lastParams()));
+    check("בלי פרטים — client_address לא נשלח", !("client_address" in createParams()));
     clientDetails = undefined;
   }
 
@@ -357,21 +392,21 @@ const runDemo = async () => {
 
   calls = [];
   await createInvoice({ customerId: "c1", items: ITEMS });
-  check("חשבונית בדמו — email_document = 0", lastParams().email_document === 0);
+  check("חשבונית בדמו — בלי doc/email", sentFlag() === 0);
 
   calls = [];
   const forced = await createInvoice({ customerId: "c1", items: ITEMS, emailDocument: true });
-  check("כפיית emailDocument:true אינה גוברת", lastParams().email_document === 0);
+  check("כפיית emailDocument:true אינה גוברת", sentFlag() === 0);
   check("emailedTo חוזר null", forced.emailedTo === null);
 
   calls = [];
   await createReceipt({ customerId: "c1", amount: 100, method: "transfer", emailDocument: true });
-  check("גם קבלה בדמו אינה נשלחת", lastParams().email_document === 0);
+  check("גם קבלה בדמו אינה נשלחת", sentFlag() === 0);
 
   process.env.BILLING_EMAIL_DOCUMENTS = "true";
   calls = [];
   await createInvoice({ customerId: "c1", items: ITEMS });
-  check("המדיניות הגורפת אינה מדליקה שליחה בדמו", lastParams().email_document === 0);
+  check("המדיניות הגורפת אינה מדליקה שליחה בדמו", sentFlag() === 0);
 
   console.log(`\n${"═".repeat(58)}`);
   console.log(failed ? `${passed} עברו · ${failed} נכשלו` : `✅ כל ${passed} בדיקות הדמו עברו`);
