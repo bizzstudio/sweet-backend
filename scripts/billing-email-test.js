@@ -163,7 +163,7 @@ const run = async () => {
     check("price_includes_vat=0 נשמר בחשבונית", p.price_includes_vat === 0);
     check("מטבע ושפה נשמרו", p.currency_code === "ILS" && p.lang === "he");
     check("doctype נשמר", p.doctype === "invoice");
-    check("תיאור (hwc — השדה שמודפס) והנחה נשמרו", p.hwc === "תיאור" && p.description === undefined && p.discount_amount === 5);
+    check("תיאור (hwc — השדה שמודפס) והנחה נשמרו", p.hwc === "תיאור" && p.description === undefined && p.discount === 5 && p.discount_amount === undefined);
     check("השורות עברו המרה", p.items?.[0]?.unitprice === 10 && p.items[0].sku === "1");
   }
 
