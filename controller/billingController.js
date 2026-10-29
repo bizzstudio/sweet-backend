@@ -1603,15 +1603,21 @@ const issueConsolidatedCredit = async (req, res) => {
     if (!isValidId(req.params.customerId)) {
       return res.status(400).send({ message: "מזהה לקוח לא תקין" });
     }
-    const issued = await creditNotes.issueConsolidated({
+    const { docs, errors } = await creditNotes.issueConsolidated({
       customerId: req.params.customerId,
       noteIds: req.body?.noteIds,
       emailDocument:
         typeof req.body?.emailDocument === "boolean" ? req.body.emailDocument : undefined,
     });
+    // לקוח עם פיצול מקבל כמה חשבוניות. אם אף אחת לא הופקה — שגיאה; אם
+    // חלק הופקו — 200 עם שתי הרשימות, כדי שהמסך יראה מה הופק ומה לא
+    if (!docs.length) {
+      return res.status(400).send({ message: errors.map((e) => e.message).join(" · "), errors });
+    }
     res.send({
-      message: `חשבונית זיכוי ${issued.creditDocNum} הופקה על ${issued.notes.length} תעודות זיכוי`,
-      ...issued,
+      message: `הופקו ${docs.length} חשבוניות זיכוי: ${docs.map((d) => d.creditDocNum).join(", ")}`,
+      docs,
+      errors,
     });
   } catch (err) {
     res.status(400).send({ message: err.message });
