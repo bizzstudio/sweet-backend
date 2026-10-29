@@ -306,13 +306,26 @@ const cleanup = async () => {
     ]).length === 2
   );
 
-  // סחורה שנשקלת: כל שורה עוגלה לאגורה בנפרד, והמכפלה המאוחדת יוצאת
-  // אגורה פחות. הסכום קודם — הקבוצה נשארת כמות שהיא.
+  // סחורה שנשקלת / מחיר לא מעוגל: כל שורה עוגלה לאגורה בנפרד, והמכפלה
+  // המאוחדת יוצאת אגורה שונה. מתאחדת במחיר = סכום ÷ כמות — אותו מחיר
+  // מודפס ואותו סכום (חשבונית 2145, 29/10/2026).
   const weighed = [
     { productId: pid(4), name: "ענבים", quantity: 1.235, unitPrice: 7.9, lineTotal: 9.76, isVatFree: true },
     { productId: pid(4), name: "ענבים", quantity: 1.235, unitPrice: 7.9, lineTotal: 9.76, isVatFree: true },
   ];
-  check("איחוד שהיה משנה את הסכום באגורה אינו מתבצע", mergeProductLines(weighed).length === 2);
+  const weighedMerged = mergeProductLines(weighed);
+  check(
+    "עיגול באגורה מתאחד בלי לשנות את הסכום",
+    weighedMerged.length === 1 &&
+      weighedMerged[0].lineTotal === 19.52 &&
+      Number((weighedMerged[0].quantity * weighedMerged[0].unitPrice).toFixed(2)) === 19.52 &&
+      Number(weighedMerged[0].unitPrice.toFixed(2)) === 7.9
+  );
+  const coffee = [3, 5, 2].map((q) => ({
+    name: "קפה עלית עם הל", quantity: q, unitPrice: 15.24 / 1.18,
+    lineTotal: Number(((q * 15.24) / 1.18).toFixed(2)), isVatFree: false,
+  }));
+  check("מחיר מחירון לא מעוגל (12.9166…) — שורה אחת, 129.16", mergeProductLines(coffee).length === 1 && mergeProductLines(coffee)[0].lineTotal === 129.16);
 
   check(
     "משקלים שמסתדרים מתאחדים, בלי זנב עשרוני בכמות",
@@ -332,6 +345,13 @@ const cleanup = async () => {
     shouldMergeProducts({ billing: { ...mergeOn.billing, mode: "perDelivery" } }) === false
   );
   // שתי רשומות כפולות בקטלוג שנראות זהות על החשבונית מתאחדות
+  check(
+    "אותו שם, ברקוד שונה (כפילות בקטלוג) — שורה אחת",
+    mergeProductLines([
+      { barcode: "55", name: "במבה", quantity: 2, unitPrice: 4, lineTotal: 8 },
+      { barcode: "56", name: "במבה", quantity: 3, unitPrice: 4, lineTotal: 12 },
+    ]).length === 1
+  );
   check(
     "אותו שם וברקוד, productId שונה — שורה אחת",
     mergeProductLines([
