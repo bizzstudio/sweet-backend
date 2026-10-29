@@ -179,6 +179,15 @@ const createManualDeliveryNote = async (req, res) => {
     if (order && !isValidId(order)) {
       return res.status(400).send({ message: "מזהה הזמנה לא תקין" });
     }
+    // תעודה מותר לתארך קדימה (תעודות של החודש הבא בזמן סגירת חודש), אבל
+    // חשבונית מס יוצאת מיד — ולא על אספקה שתאריכה עוד לא הגיע
+    if (billNow === true && issuedAt) {
+      const day = (d) => d.toLocaleDateString("en-CA", { timeZone: "Asia/Jerusalem" });
+      const parsed = new Date(issuedAt);
+      if (!Number.isNaN(parsed.getTime()) && day(parsed) > day(new Date())) {
+        return res.status(400).send({ message: "לא ניתן להפיק חשבונית בתאריך עתידי" });
+      }
+    }
 
     const { note, created, quality } = await deliveryNotes.createManual({
       customerId: customer,
