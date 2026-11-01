@@ -15,6 +15,7 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
 const DeliveryNote = require("../models/DeliveryNote");
+const CreditNote = require("../models/CreditNote");
 const CustomerBalanceEntry = require("../models/CustomerBalanceEntry");
 
 (async () => {
@@ -48,6 +49,7 @@ const CustomerBalanceEntry = require("../models/CustomerBalanceEntry");
   }
 
   const res = await DeliveryNote.updateMany(query, { $unset: { "billing.demo": "" } });
+  await CreditNote.updateMany(query, { $unset: { "billing.demo": "" } });
   const removed = await CustomerBalanceEntry.deleteMany({ demo: true });
   console.log(
     `\n✅ נמחק מצב הדמו מ-${res.modifiedCount} תעודות · נמחקו ${removed.deletedCount} תנועות יתרה`

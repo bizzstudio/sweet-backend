@@ -22,6 +22,8 @@ const { listReceipts, isDayString } = require("../lib/billing/receipts");
 const customerBalance = require("../lib/billing/customerBalance");
 const { customerPurchaseReport, SOURCES } = require("../lib/billing/purchaseReport");
 const { summaryReport } = require("../lib/billing/summaryReport");
+const { debtReport } = require("../lib/billing/debtReport");
+const { nettedInto } = require("../lib/billing/nettedCredits");
 const { calculateVat } = require("../lib/billing/vat");
 const {
   createReceipt,
@@ -312,6 +314,8 @@ const getDeliveryNotes = async (req, res) => {
     // שהודפס) וגם בכרטיס הלקוח — לקוח ששמו שונה מאז חייב להימצא בשני השמות.
     // בכרטיס השם מפוצל ל-name ו-lastName ובתעודה הוא מחובר, ולכן ההשוואה
     // לכרטיס נעשית על החיבור — אחרת "משה כהן" לא היה מוצא את משה כהן.
+    // מספר נבדק גם כמספר התעודה וכמספר החשבונית שסגרה אותה (בקשת הלקוחה,
+    // 01/11/2026).
     if (search) {
       const pattern = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const rx = { $regex: pattern, $options: "i" };
@@ -331,6 +335,9 @@ const getDeliveryNotes = async (req, res) => {
         { "customerSnapshot.name": rx },
         { "customerSnapshot.customerNumber": rx },
         { customer: { $in: matched.map((c) => c._id) } },
+        ...(/^\d+$/.test(search)
+          ? [{ number: Number(search) }, { [ledger.f("icountDocNum")]: search }]
+          : []),
       ];
     }
     // תעודות ישנות נוצרו לפני שהשדה קיים והן כולן אוטומטיות. סינון על
@@ -702,14 +709,18 @@ const closeMessage = (result, noteIds) => {
       : `אין תעודות פתוחות לחיוב בחודש ${result.month}`;
   }
 
+  const creditsLeft = result.creditsLeftOpen
+    ? `. ${result.creditsLeftOpen} תעודות זיכוי לא נכנסו לחשבונית ונשארו פתוחות`
+    : "";
+
   if (result.selectionUsed) {
     const rest = result.remainingOpen
       ? `. ${result.remainingOpen} תעודות נשארו פתוחות ויחויבו בסגירת החודש`
       : "";
-    return `הופקו ${result.invoicesCreated} חשבוניות על ${noteIds.length} תעודות שנבחרו${rest}`;
+    return `הופקו ${result.invoicesCreated} חשבוניות על ${noteIds.length} תעודות שנבחרו${rest}${creditsLeft}`;
   }
 
-  return `חודש ${result.month} נסגר — ${result.invoicesCreated} חשבוניות ל-${result.customersProcessed} לקוחות`;
+  return `חודש ${result.month} נסגר — ${result.invoicesCreated} חשבוניות ל-${result.customersProcessed} לקוחות${creditsLeft}`;
 };
 
 // גבול ההערה המוקלדת במסך הסגירה. השרת חותך ממילא את הטקסט כולו
@@ -745,6 +756,21 @@ const closeMonth = async (req, res) => {
         .send({ message: "בחירת תעודות ספציפיות אפשרית רק כשנבחר לקוח בודד" });
     }
 
+    // תעודות הזיכוי שסומנו במסך. רשימה ריקה היא בחירה: אף זיכוי לא נכנס
+    let creditNoteIds;
+    if (req.body.creditNotes !== undefined) {
+      const list = req.body.creditNotes;
+      if (
+        !Array.isArray(list) ||
+        list.length > MAX_ITEMS_PER_REQUEST ||
+        !req.body.customer ||
+        list.some((id) => !isValidId(String(id)))
+      ) {
+        return res.status(400).send({ message: "רשימת תעודות הזיכוי אינה תקינה" });
+      }
+      creditNoteIds = list.map(String);
+    }
+
     // הערה שמודפסת על החשבונית (hwc). רק ללקוח בודד.
     const remarks =
       typeof req.body.remarks === "string" ? req.body.remarks.trim() : "";
@@ -765,6 +791,7 @@ const closeMonth = async (req, res) => {
       month: req.body.month,
       customerId: req.body.customer,
       noteIds,
+      creditNoteIds,
       remarks: remarks || undefined,
       // רק בוליאני מפורש מהבקשה גובר על המדיניות. body בלי השדה חייב
       // להישאר undefined ולא false — אחרת כל לחיצה במסך הייתה מבטלת בשקט
@@ -1215,6 +1242,19 @@ const getCustomerPurchaseReport = async (req, res) => {
  *
  * ?from=YYYY-MM-DD&to=YYYY-MM-DD&customer=<id>
  */
+/** כמה כל לקוח חייב, לפי חודש. ?customer= מצמצם ללקוח אחד. */
+const getDebtReport = async (req, res) => {
+  try {
+    const customer = typeof req.query.customer === "string" ? req.query.customer : "";
+    if (req.query.customer && !isValidId(customer)) {
+      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
+    }
+    res.send(await debtReport({ customerId: customer || undefined }));
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
 const getSummaryReport = async (req, res) => {
   try {
     const { customer, from, to } = req.query;
@@ -1535,7 +1575,24 @@ const getCreditNotes = async (req, res) => {
     // המשלוח; "billed" הוא מצב של הכיס הפעיל
     if (status === "open") Object.assign(query, ledger.openQuery());
     else if (status === "cancelled") query["billing.status"] = "cancelled";
-    else if (status === "billed") query[ledger.f("status")] = "billed";
+    else if (status === "billed" || status === "netted") query[ledger.f("status")] = status;
+
+    // חיפוש לפי מספר התעודה, החשבונית שסגרה אותה, או הלקוח (בצילום שעליה)
+    const search = String(req.query.search || "").trim().slice(0, 80);
+    if (search) {
+      const rx = { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" };
+      query.$or = [
+        { "customerSnapshot.name": rx },
+        { "customerSnapshot.customerNumber": rx },
+        ...(/^\d+$/.test(search)
+          ? [
+              { number: Number(search) },
+              { [ledger.f("creditDocNum")]: search },
+              { [ledger.f("invoiceDocNum")]: search },
+            ]
+          : []),
+      ];
+    }
 
     const [list, total] = await Promise.all([
       CreditNote.find(query).sort({ number: -1 }).skip(skip).limit(limit).lean(),
@@ -1679,6 +1736,14 @@ const getInvoiceNotes = async (req, res) => {
     );
     const shipping = notes.reduce((s, n) => s + (Number(n.shippingCost) || 0), 0);
     const discount = notes.reduce((s, n) => s + (Number(n.discount) || 0), 0);
+    // תעודות הזיכוי שנסגרו בחשבונית. הן נפרדות מ-notes: למסך התיקון אלו
+    // אינן תעודות לעריכה, ובנספח הן שורות במינוס
+    const netted = await nettedInto({
+      docNums: [docNum],
+      customerId: notes[0].customer,
+    });
+    const credits = netted.get(`${notes[0].customer}|${docNum}`) || [];
+    const creditTotal = credits.reduce((s, c) => s + c.net, 0);
 
     res.send({
       docNum,
@@ -1732,12 +1797,20 @@ const getInvoiceNotes = async (req, res) => {
             }
           : {}),
       })),
+      creditNotes: credits.map((c) => ({
+        _id: c._id,
+        number: c.number,
+        issuedAt: c.issuedAt,
+        notes: c.notes || c.reason,
+        total: round(c.net),
+      })),
       totals: {
         noteCount: notes.length,
         itemsTotal: round(itemsTotal),
         shipping: round(shipping),
         discount: round(discount),
-        net: round(itemsTotal + shipping - discount),
+        creditTotal: round(creditTotal),
+        net: round(itemsTotal + shipping - discount - creditTotal),
       },
     });
   } catch (err) {
@@ -2135,6 +2208,7 @@ module.exports = {
   getCustomerDocuments,
   getCustomerPurchaseReport,
   getSummaryReport,
+  getDebtReport,
   icountMode,
   demoOptions,
   createDemoInvoice,

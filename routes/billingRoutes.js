@@ -116,6 +116,8 @@ router.get("/customer/:customerId/documents", isAdmin, billingController.getCust
 router.get("/reports/customer-purchases", isAdmin, billingController.getCustomerPurchaseReport);
 // עמוד ריכוז: תעודות וחשבוניות בטווח, בכסף. ?from=&to=&customer=
 router.get("/reports/summary", isAdmin, billingController.getSummaryReport);
+// כמה כל לקוח חייב, לפי חודש
+router.get("/reports/debts", isAdmin, billingController.getDebtReport);
 
 // --- חשבוניות וגבייה ---
 // ?status=paid|unpaid|overdue&customer=<id>

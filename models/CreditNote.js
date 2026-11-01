@@ -46,6 +46,10 @@ const creditDocFields = {
   // מקושר לחשבונית מסוימת
   originalDocNum: { type: String, required: false },
   billedAt: { type: Date, required: false },
+  // החשבונית החודשית שהזיכוי נסגר בתוכה (status "netted")
+  invoiceDocNum: { type: String, required: false },
+  invoiceDocUrl: { type: String, required: false },
+  nettedAt: { type: Date, required: false },
 };
 
 const creditNoteSchema = new mongoose.Schema(
@@ -96,10 +100,11 @@ const creditNoteSchema = new mongoose.Schema(
       // open     = התעודה קיימת, חשבונית זיכוי עוד לא הופקה
       // billing  = נתפסה להפקה (ההגנה מפני חשבונית זיכוי כפולה)
       // billed   = הופקה חשבונית זיכוי
+      // netted   = נסגרה בתוך החשבונית החודשית, בלי חשבונית זיכוי משלה
       // cancelled = בוטלה לפני שהופקה חשבונית
       status: {
         type: String,
-        enum: ["open", "billing", "billed", "cancelled"],
+        enum: ["open", "billing", "billed", "netted", "cancelled"],
         default: "open",
       },
       ...creditDocFields,
@@ -109,7 +114,7 @@ const creditNoteSchema = new mongoose.Schema(
       demo: {
         status: {
           type: String,
-          enum: ["open", "billing", "billed"],
+          enum: ["open", "billing", "billed", "netted"],
           required: false,
         },
         ...creditDocFields,
@@ -124,6 +129,8 @@ creditNoteSchema.index({ number: -1 });
 creditNoteSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
 // רשימת החשבוניות מצרפת לכל חשבונית את הזיכויים שמקושרים אליה
 creditNoteSchema.index({ "billing.originalDocNum": 1 }, { sparse: true });
+// וגם את הזיכויים שנסגרו בתוכה
+creditNoteSchema.index({ "billing.invoiceDocNum": 1 }, { sparse: true });
 
 const CreditNote = mongoose.model("CreditNote", creditNoteSchema);
 
