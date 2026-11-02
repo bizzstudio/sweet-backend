@@ -1605,6 +1605,20 @@ const getCreditNotes = async (req, res) => {
   }
 };
 
+/** חשבוניות הזיכוי שהופקו, אחת לכל מסמך (גם מרוכזת שמכסה כמה תעודות). */
+const getIssuedCreditInvoices = async (req, res) => {
+  try {
+    const customer = typeof req.query.customer === "string" ? req.query.customer : "";
+    if (req.query.customer && !isValidId(customer)) {
+      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
+    }
+    const search = typeof req.query.search === "string" ? req.query.search : "";
+    res.send({ docs: await creditNotes.listIssued({ customerId: customer || undefined, search }) });
+  } catch (err) {
+    res.status(500).send({ message: err.message });
+  }
+};
+
 const getCreditNote = async (req, res) => {
   try {
     if (!isValidId(req.params.id)) {
@@ -2199,6 +2213,7 @@ module.exports = {
   previewCreditNote,
   createCreditNote,
   getCreditNotes,
+  getIssuedCreditInvoices,
   getCreditNote,
   issueCreditNoteInvoice,
   previewConsolidatedCredit,

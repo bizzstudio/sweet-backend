@@ -98,6 +98,8 @@ router.post(
   isAdmin,
   billingController.issueConsolidatedCredit
 );
+// חשבוניות הזיכוי שהופקו, מקובצות לפי מסמך. גם זה לפני /credit-notes/:id
+router.get("/credit-notes/issued", isAdmin, billingController.getIssuedCreditInvoices);
 router.get("/credit-notes/:id", isAdmin, billingController.getCreditNote);
 router.post("/credit-notes/:id/invoice", isAdmin, billingController.issueCreditNoteInvoice);
 router.patch("/credit-notes/:id/cancel", isAdmin, billingController.cancelCreditNote);
