@@ -24,6 +24,7 @@ const {
   COLLECT_WINDOW_MS,
 } = require("../lib/order-ingestion");
 const { checkStock } = require("../lib/order-ingestion/createOrder");
+const { findCustomerByEmail } = require("../lib/order-ingestion/resolvers");
 const { pollOnce, isMailConfigured, getActiveChannel } = require("../lib/mail-reader");
 const { getIngestionErrorStatusId } = require("../utils/ingestionStatus");
 const {
@@ -1016,9 +1017,21 @@ const approveSenderAndReprocess = async (req, res) => {
         .send({ message: "אין מייל ואין טלפון בשולח — לא ניתן ליצור ממנו לקוח" });
     }
 
-    // ייתכן שהלקוח נוסף בינתיים ידנית — לא יוצרים כפילות
+    // ייתכן שהלקוח נוסף בינתיים ידנית, או שהכתובת היא מייל איש הקשר שלו —
+    // לא יוצרים כפילות
     let customer = null;
-    if (email) customer = await Customer.findOne({ email });
+    if (email) {
+      const found = await findCustomerByEmail(email);
+      if (found.ambiguous) {
+        return res.status(409).send({
+          message:
+            `הכתובת ${email} רשומה כמייל איש קשר אצל כמה לקוחות ` +
+            `(${found.ambiguous.map((c) => c.name).join(", ")}). ` +
+            `יש להשאיר אותה רק בכרטיס של הלקוח ששולח ממנה הזמנות.`,
+        });
+      }
+      customer = found.customer;
+    }
 
     let created = false;
     if (!customer) {
