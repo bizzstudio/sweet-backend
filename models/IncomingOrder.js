@@ -24,6 +24,7 @@ const INCOMING_ORDER_ERROR_CODES = [
   "platform_login_required",     // הקישור נפתח אבל הדף דרש התחברות לפלטפורמה
   "link_unreadable",             // הקישור לא נפתח, נחסם, או שלא היה בו טקסט
   "platform_customer_unmapped",  // ההזמנה נקראה, אבל לא ידוע איזה לקוח שלנו זה
+  "branch_unresolved",    // קובץ של סניף מתוך מייל רשת, ולא זוהה איזה סניף
 ];
 
 // פריט שזוהה בהודעה + מה הוא הותאם אליו בקטלוג
@@ -139,6 +140,18 @@ const incomingOrderSchema = new mongoose.Schema(
       ],
       required: false,
       default: undefined,
+    },
+
+    // ── קובץ אחד מתוך מייל עם כמה קבצי הזמנה ──
+    //
+    // מייל רשת עם קובץ לכל סניף נקלט כרשומה לכל קובץ, וכל אחת הופכת להזמנה
+    // ולתעודה משלה. ‏externalId של הרשומה הוא של המייל + "#file<n>", וכאן
+    // נשמר המזהה של המייל עצמו — הוא מה שמונע קליטה חוזרת של אותו מייל.
+    splitFrom: {
+      externalId: { type: String, required: false },
+      index: { type: Number, required: false },   // 1..total
+      total: { type: Number, required: false },
+      filename: { type: String, required: false },
     },
 
     // תוצאת הפתיחה בפועל. נשמרת גם בכשל — היא ההסבר שהמסך מציג.
@@ -272,6 +285,11 @@ incomingOrderSchema.index({ "sender.phone": 1 });
 incomingOrderSchema.index({ status: 1, processAfter: 1 });
 // מניעת צירוף כפול של אותה הודעה לרשומה פתוחה
 incomingOrderSchema.index({ "messages.externalId": 1 });
+// מניעת קליטה חוזרת של מייל שפוצל לקובץ-קובץ — נבדק בכל הודעה נכנסת
+incomingOrderSchema.index(
+  { "splitFrom.externalId": 1 },
+  { partialFilterExpression: { "splitFrom.externalId": { $exists: true } } }
+);
 
 // ── מניעת הזמנה כפולה מאותו קישור ──
 //
