@@ -288,13 +288,19 @@ const reload = (note) => CreditNote.findById(note._id).lean();
       JSON.stringify(invoicesSent.at(-1).items.map((i) => [i.name, i.unitPrice])),
     JSON.stringify(refund.items)
   );
+  check("זיכוי של ביטול לא נשלח ללקוח במייל", refund.emailDocument === false, String(refund.emailDocument));
   const hStored = await reload(hCredit);
   check("התעודה חזרה לפתוחה", hStored.billing.status === "open" && !hStored.billing.invoiceDocNum);
 
   await close(h);
   const hDoc2 = invoicesSent.at(-1).docNum;
-  const reissued = await reissueInvoice({ icountDocNum: hDoc2, reason: "תיקון", emailDocument: false });
+  const reissued = await reissueInvoice({ icountDocNum: hDoc2, reason: "תיקון", emailDocument: true });
   check("התיקון הצליח", reissued.stage === "done", JSON.stringify(reissued));
+  check(
+    "בהפקה מחדש תיבת המייל חלה רק על החשבונית החדשה",
+    refundsSent.at(-1).emailDocument === false && invoicesSent.at(-1).emailDocument === true,
+    `${refundsSent.at(-1).emailDocument} / ${invoicesSent.at(-1).emailDocument}`
+  );
   check("הזיכוי נכנס גם לחשבונית החדשה", invoicesSent.at(-1).items.some((i) => i.unitPrice === -50));
   check("ומשויך אליה", (await reload(hCredit)).billing.invoiceDocNum === reissued.docNums[0]);
 
