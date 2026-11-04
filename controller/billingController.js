@@ -23,6 +23,7 @@ const customerBalance = require("../lib/billing/customerBalance");
 const { customerPurchaseReport, SOURCES } = require("../lib/billing/purchaseReport");
 const { summaryReport } = require("../lib/billing/summaryReport");
 const { debtReport } = require("../lib/billing/debtReport");
+const { accountingExport } = require("../lib/billing/accountingExport");
 const { nettedInto } = require("../lib/billing/nettedCredits");
 const { calculateVat } = require("../lib/billing/vat");
 const {
@@ -1268,6 +1269,32 @@ const getSummaryReport = async (req, res) => {
   }
 };
 
+/**
+ * ייצוא מסמכי המס להנהלת החשבונות, ישירות מ-iCount
+ * (lib/billing/accountingExport).
+ *
+ * ?from=YYYY-MM-DD&to=YYYY-MM-DD&types=invoice,refund,receipt,invrec
+ */
+const getAccountingExport = async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    if (!isDayString(from) || !isDayString(to)) {
+      return res.status(400).send({ message: "יש לבחור מתאריך ועד תאריך" });
+    }
+    const invalid = invalidCustomerDateRange({ from, to });
+    if (invalid) return res.status(400).send({ message: invalid });
+
+    const types = String(req.query.types || "")
+      .split(",")
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    res.send(await accountingExport({ from, to, types }));
+  } catch (err) {
+    res.status(err.status || 500).send({ message: err.message });
+  }
+};
+
 // ---------- הצעות מחיר ----------
 
 /**
@@ -2224,6 +2251,7 @@ module.exports = {
   getCustomerPurchaseReport,
   getSummaryReport,
   getDebtReport,
+  getAccountingExport,
   icountMode,
   demoOptions,
   createDemoInvoice,

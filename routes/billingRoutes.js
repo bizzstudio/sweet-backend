@@ -120,6 +120,8 @@ router.get("/reports/customer-purchases", isAdmin, billingController.getCustomer
 router.get("/reports/summary", isAdmin, billingController.getSummaryReport);
 // כמה כל לקוח חייב, לפי חודש
 router.get("/reports/debts", isAdmin, billingController.getDebtReport);
+// ייצוא מסמכי המס (חשבוניות, זיכויים, קבלות) מ-iCount להנהלת החשבונות. ?from=&to=&types=
+router.get("/reports/accounting-export", isAdmin, billingController.getAccountingExport);
 
 // --- חשבוניות וגבייה ---
 // ?status=paid|unpaid|overdue&customer=<id>
