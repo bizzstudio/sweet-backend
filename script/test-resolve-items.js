@@ -16,6 +16,7 @@ const productMatching = require("../utils/productMatching");
 const productAliases = require("../utils/productAliases");
 const catalogVocabulary = require("../utils/catalogVocabulary");
 const manualItems = require("../lib/billing/manualItems");
+const stockOthers = require("../lib/stock-controller/others");
 
 // ── קטלוג מדומה ──
 const product = (id, he, sku = id) => ({
@@ -110,8 +111,13 @@ productMatching.matchProductByName = async (name) => {
   const hit = MATCHES[name];
   return hit ? { quantityFromText: null, query: name, pool: hit.alternatives, ...hit } : null;
 };
-productAliases.findAliasMatch = async () => null;
+// אליאסים לפי שם מנוקה; בדיקה מוסיפה ומוחקת. אובייקט ולא החלפת הפונקציה,
+// כי resolvers פירק אותה בזמן הטעינה.
+const ALIASES = {};
+productAliases.findAliasMatch = async (name) => ALIASES[name] || null;
 productAliases.recordAliasHit = () => {};
+// מתג "מלאי חופשי" נקרא מההגדרות במסד; בלי תחליף כל קריאה ממתינה 10 שניות
+stockOthers.isStockUnlimited = async () => false;
 catalogVocabulary.getCatalogVocabulary = async () =>
   new Map([
     ["חלב", 41],
@@ -212,6 +218,26 @@ const run = async () => {
       dropped.length === 0 && items.length + unmatched.length === 1,
       true
     );
+  }
+
+  section('אליאס על שורה עם "(לא ...)" (טבולה, 05/11/26)');
+  {
+    const muller = (id, he) => product(id, he);
+    const mix = muller("mullerMix", "מעדן מולר 20 גרם חלבון מיקס טעמים");
+    const natural = muller("mullerNatural", "מעדן מולר 20 גרם חלבון בטעם טבעי");
+    const key = "מולר-20 גרם חלבון 1.6% - מיקס טעמים";
+    const line = `${key} (לא בטעם טבעי) (ניתן להביא תחליף מקביל)`;
+    const aliasTo = (p) => ({ product: p, products: [{ product: p, quantity: null }], alias: { _id: "a1" }, scope: "customer" });
+
+    ALIASES[key] = aliasTo(mix);
+    let { items, unmatched } = await resolveItems([{ rawName: line, quantity: 2 }], { customerId: "c1" });
+    check("ההכרעה שנשמרה חלה למרות השלילה", [items.length, unmatched.length, items[0]?.product?._id], [1, 0, "mullerMix"]);
+    check("הוראת התחליף מגיעה למלקט", items[0]?.note, "ניתן להביא תחליף מקביל");
+
+    ALIASES[key] = aliasTo(natural);
+    ({ items } = await resolveItems([{ rawName: line, quantity: 2 }], { customerId: "c1" }));
+    check("אליאס שמוביל בדיוק למה שנשלל — לא חל", items[0]?.product?._id === "mullerNatural", false);
+    delete ALIASES[key];
   }
 
   section("סחורה במשקל");
