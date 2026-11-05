@@ -23,7 +23,8 @@ const {
   releaseCollectedMessages,
   COLLECT_WINDOW_MS,
 } = require("../lib/order-ingestion");
-const { checkStock } = require("../lib/order-ingestion/createOrder");
+const { checkStock, saveOrder } = require("../lib/order-ingestion/createOrder");
+const { splitDisposablesOrder } = require("../lib/order-ingestion/disposablesSplit");
 const { findCustomerByEmail } = require("../lib/order-ingestion/resolvers");
 const { pollOnce, isMailConfigured, getActiveChannel } = require("../lib/mail-reader");
 const { getIngestionErrorStatusId } = require("../utils/ingestionStatus");
@@ -611,32 +612,44 @@ const approveErrorOrder = async (req, res) => {
       });
     }
 
-    await logStatusChange({
-      from: previousStatusName,
-      to: "Processing",
-      functionName: `approveErrorOrder:${approvedBy}`,
-      order: claimed,
-      issueDeliveryNote,
-    });
+    // לקוח עם תקציב נפרד לאחזקה: הפיצול כאן ולא ביצירת הזמנת השגיאה, כי
+    // עד האישור אדם עוד מתקן את הפריטים. ראה disposablesSplit.js
+    const customer = await Customer.findById(claimed.user).select("billing").lean();
+    const orders = await splitDisposablesOrder(claimed, customer, saveOrder);
 
-    // הורדת מלאי — לא נעשתה ביצירת הזמנת השגיאה.
-    // רק אחרי התפיסה האטומית, כדי שלא תרוץ פעמיים.
-    try {
-      await handleProductQuantity(claimed.cart);
-    } catch (stockError) {
-      console.error(
-        `[approveErrorOrder] כשל בהורדת מלאי להזמנה ${claimed.invoice}: ${stockError.message}`
-      );
+    for (const part of orders) {
+      await logStatusChange({
+        // הזמנת האחזקה נוצרה עכשיו ולא הייתה ב"שגיאה בקריאה"
+        from: part === claimed ? previousStatusName : "No Status",
+        to: "Processing",
+        functionName: `approveErrorOrder:${approvedBy}`,
+        order: part,
+        issueDeliveryNote,
+      });
+
+      // הורדת מלאי — לא נעשתה ביצירת הזמנת השגיאה.
+      // רק אחרי התפיסה האטומית, כדי שלא תרוץ פעמיים.
+      try {
+        await handleProductQuantity(part.cart);
+      } catch (stockError) {
+        console.error(
+          `[approveErrorOrder] כשל בהורדת מלאי להזמנה ${part.invoice}: ${stockError.message}`
+        );
+      }
+
+      // עכשיו מותר להודיע — ההזמנה אושרה ע"י אדם
+      try {
+        await sendOrderNotificationEmail(part, part.user_info);
+      } catch (emailError) {
+        console.error(
+          `[approveErrorOrder] כשל בשליחת התראת מייל להזמנה ${part.invoice}: ${emailError.message}`
+        );
+      }
     }
 
-    // עכשיו מותר להודיע — ההזמנה אושרה ע"י אדם
-    try {
-      await sendOrderNotificationEmail(claimed, claimed.user_info);
-    } catch (emailError) {
-      console.error(
-        `[approveErrorOrder] כשל בשליחת התראת מייל להזמנה ${claimed.invoice}: ${emailError.message}`
-      );
-    }
+    const splitNote = orders[1]
+      ? ` האחזקה פוצלה להזמנה ${orders[1].invoice}.`
+      : "";
 
     // הוצאת ההודעה מרשימת הטיפול
     if (claimed.incomingOrder) {
@@ -646,7 +659,7 @@ const approveErrorOrder = async (req, res) => {
           logs: {
             at: new Date(),
             step: "manual",
-            message: `הזמנת השגיאה ${claimed.invoice} אושרה ע"י ${approvedBy}`,
+            message: `הזמנת השגיאה ${claimed.invoice} אושרה ע"י ${approvedBy}.${splitNote}`,
           },
         },
       });
@@ -654,7 +667,7 @@ const approveErrorOrder = async (req, res) => {
 
     res.send({
       message:
-        `הזמנה ${claimed.invoice} אושרה והועברה לבטיפול. המלאי עודכן.` +
+        `הזמנה ${claimed.invoice} אושרה והועברה לבטיפול. המלאי עודכן.${splitNote}` +
         (issueDeliveryNote ? "" : ` ${NOTE_DEFERRED_MESSAGE}`),
       order: claimed,
       issueDeliveryNote,

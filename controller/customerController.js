@@ -1642,6 +1642,13 @@ const updateCustomer = async (req, res) => {
           customer.set("billing.separateFruitInvoice", !!req.body.billing.separateFruitInvoice);
         }
 
+        if (req.body.billing?.separateDisposablesNote !== undefined) {
+          customer.set(
+            "billing.separateDisposablesNote",
+            !!req.body.billing.separateDisposablesNote
+          );
+        }
+
         // אחוז ההנחה הקבוע של הלקוח. יורד מכל מסמך שמופק לו מכאן והלאה
         // (תעודה, הצעה, חשבונית) — ראה lib/billing/pricing.
         //

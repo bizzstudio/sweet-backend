@@ -120,6 +120,11 @@ const CustomerBillingSchema = new mongoose.Schema(
     // — שלוש חשבוניות.
     separateFruitInvoice: { type: Boolean, default: false },
 
+    // פיצול ההזמנה עצמה (בקשה 05/11/2026): הזמנה נקלטת שיש בה גם ח.ניקוי+ח"פ
+    // וגם משהו אחר הופכת לשתי הזמנות — כיבוד ואחזקה — ולכן לשתי תעודות.
+    // ראה lib/order-ingestion/disposablesSplit.js
+    separateDisposablesNote: { type: Boolean, default: false },
+
     // אחוז הנחה קבוע שסוכם עם הלקוח, ויורד מכל מסמך שמופק לו — תעודת
     // משלוח, הצעת מחיר והחשבונית החודשית.
     //
