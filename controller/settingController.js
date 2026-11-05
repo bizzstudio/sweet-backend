@@ -139,6 +139,12 @@ const updateStoreSetting = async (req, res) => {
           // סף התראת מלאי נמוך
           "setting.low_stock_threshold": req.body.setting.low_stock_threshold,
 
+          // מלאי חופשי — מלאי חסר אינו חוסם הזמנות. נכתב רק כשנשלח: טאב אדמין
+          // ישן ששומר בלי השדה לא יכבה את המתג בשקט.
+          ...(typeof req.body.setting.unlimited_stock_status === "boolean" && {
+            "setting.unlimited_stock_status": req.body.setting.unlimited_stock_status,
+          }),
+
           // משלוח חינם מעל סכום קנייה
           "setting.free_shipping_status": req.body.setting.free_shipping_status,
           "setting.free_shipping_threshold":

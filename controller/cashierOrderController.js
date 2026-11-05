@@ -9,7 +9,7 @@ const dayjs = require("dayjs");
 const utc = require("dayjs/plugin/utc");
 const timezone = require("dayjs/plugin/timezone");
 const CashierOrder = require("../models/CashierOrder");
-const { handleProductQuantity } = require("../lib/stock-controller/others");
+const { handleProductQuantity, isStockUnlimited } = require("../lib/stock-controller/others");
 const { findOptimalOfferCombination } = require("../utils/offerCalculations");
 const { findServerItemForClientLine } = require("../utils/cartOfferSync");
 
@@ -35,6 +35,7 @@ const addCashierOrder = async (req, res) => {
     const productMap = new Map(products.map(product => [product._id.toString(), product]));
 
     // בדיקה על מוצרים חסרים או ששונה להם המחיר
+    const unlimitedStock = await isStockUnlimited();
     for (const item of cartItems) {
       const product = productMap.get(item._id.toString());
 
@@ -54,8 +55,8 @@ const addCashierOrder = async (req, res) => {
         });
       } else if (isGiftItem) {
         // מתנה/פרס — לא נחסם ע"י הסתרה/מלאי
-      } else if (typeof product.stock === "number" && product.stock < item.quantity) {
-        // מלאי לא מספק (מלאי null = בלתי מוגבל)
+      } else if (!unlimitedStock && typeof product.stock === "number" && product.stock < item.quantity) {
+        // מלאי לא מספק (מלאי null = בלתי מוגבל) — ומתג "מלאי חופשי" מבטל את הבדיקה
         missingProducts.push({
           ...product.toObject(),
           reason: 'לא במלאי'
