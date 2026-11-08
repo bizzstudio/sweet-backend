@@ -11,6 +11,7 @@
 const mongoose = require("mongoose");
 const GroupPriceList = require("../models/GroupPriceList");
 const Customer = require("../models/Customer");
+const CustomerPriceList = require("../models/CustomerPriceList");
 const { normalizeSku } = require("../utils/customerPriceList");
 const {
   MAX_ROWS,
@@ -181,6 +182,95 @@ const checkImportGroupPriceList = async (req, res) => {
     res.send(await analyzeImportRows(rows));
   } catch (err) {
     console.log("checkImportGroupPriceList error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
+/* ------------------------------------------------------------------ *
+ * השוואת מחירונים: {customers, groupId?}
+ *
+ * המחירונים הפרטיים של כמה לקוחות (בדרך כלל סניפים של אותה חברה) זה לצד זה,
+ * כדי לבחור מחיר אחד לכל מוצר ולבנות מהם מחירון קבוצתי (בקשת הלקוחה,
+ * 08/11/2026 — "איך אני יכולה לראות השוואה בין המחירים שלהם").
+ *
+ * עם groupId מוחזרים גם המחירים שכבר בקבוצה: אחרי שהקבוצה קיימת, שינויי מחיר
+ * מתעודות נכתבים אליה ולא למחירונים הפרטיים, ולכן הפרטיים כבר אינם עדכניים.
+ * ------------------------------------------------------------------ */
+const MAX_COMPARE_CUSTOMERS = 200;
+
+const comparePriceLists = async (req, res) => {
+  try {
+    const raw = Array.isArray(req.body?.customers) ? req.body.customers : [];
+    if (raw.length > MAX_COMPARE_CUSTOMERS) {
+      return res
+        .status(400)
+        .send({ message: `ניתן להשוות עד ${MAX_COMPARE_CUSTOMERS} לקוחות בבת אחת` });
+    }
+    const ids = await resolveCustomerIds(raw);
+    if (ids.length === 0) {
+      return res.status(400).send({ message: "יש לבחור לקוחות להשוואה" });
+    }
+
+    const groupId = req.body?.groupId;
+    const [customers, lists, group] = await Promise.all([
+      Customer.find({ _id: { $in: ids } })
+        .select("_id name lastName erp.customerNumber")
+        .lean(),
+      CustomerPriceList.find({ customer: { $in: ids } })
+        .select("+items customer")
+        .lean(),
+      isId(groupId) ? GroupPriceList.findById(groupId).select("+items name").lean() : null,
+    ]);
+
+    // מק"ט → {name, prices: {customerId: price}}. אותו כלל כמו בתמחור: שורה
+    // בלי מחיר חיובי אינה תופסת, ולכן אינה מוצגת כמחיר של הסניף
+    const bySku = new Map();
+    const entry = (sku, name) => {
+      if (!bySku.has(sku)) bySku.set(sku, { sku, name: name || "", prices: {} });
+      const row = bySku.get(sku);
+      if (!row.name && name) row.name = name;
+      return row;
+    };
+    const itemsCount = new Map();
+    lists.forEach((list) => {
+      const customerId = String(list.customer);
+      let count = 0;
+      (list.items || []).forEach((item) => {
+        const sku = normalizeSku(item.sku);
+        if (!sku || !(item.price > 0)) return;
+        entry(sku, item.name).prices[customerId] = item.price;
+        count += 1;
+      });
+      itemsCount.set(customerId, count);
+    });
+    (group?.items || []).forEach((item) => {
+      const sku = normalizeSku(item.sku);
+      if (!sku || !(item.price > 0)) return;
+      entry(sku, item.name).groupPrice = item.price;
+    });
+
+    const catalogBySku = await fetchCatalogBySku([...bySku.keys()]);
+    const items = [...bySku.values()].map((row) => {
+      const product = lookupCatalog(catalogBySku, row.sku);
+      const title = product?.title?.he || product?.title?.en || "";
+      return { ...row, name: title || row.name, inCatalog: Boolean(product) };
+    });
+    items.sort((a, b) => a.name.localeCompare(b.name, "he") || a.sku.localeCompare(b.sku));
+
+    res.send({
+      customers: customers
+        .map((customer) => ({
+          _id: String(customer._id),
+          name: `${customer.name || ""} ${customer.lastName || ""}`.trim(),
+          customerNumber: customer.erp?.customerNumber || "",
+          itemsCount: itemsCount.get(String(customer._id)) || 0,
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name, "he")),
+      group: group ? { _id: String(group._id), name: group.name } : null,
+      items,
+    });
+  } catch (err) {
+    console.log("comparePriceLists error: ", err);
     res.status(500).send({ message: err.message });
   }
 };
@@ -453,4 +543,5 @@ module.exports = {
   updateGroupPriceList,
   deleteGroupPriceList,
   setCustomerGroup,
+  comparePriceLists,
 };

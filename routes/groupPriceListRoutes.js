@@ -14,6 +14,7 @@ const {
   updateGroupPriceList,
   deleteGroupPriceList,
   setCustomerGroup,
+  comparePriceLists,
 } = require("../controller/groupPriceListController");
 const { isCustomerManager } = require("../controller/customerController");
 const { isAdmin } = require("../config/auth");
@@ -36,6 +37,8 @@ router.get("/", isAdmin, getGroupPriceLists);
 router.post("/", isAdmin, isPriceListManager, createGroupPriceList);
 
 // הנתיבים הקבועים נרשמים לפני "/:id", אחרת "check" ו-"customer" היו נבלעים בו
+// השוואה היא קריאה בלבד — פתוחה לכל איש צוות, כמו צפייה במחירון
+router.post("/compare", isAdmin, comparePriceLists);
 router.post("/check", isAdmin, isPriceListManager, checkImportGroupPriceList);
 router.put("/customer/:customerId", isAdmin, isPriceListManager, setCustomerGroup);
 
