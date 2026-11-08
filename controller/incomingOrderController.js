@@ -24,7 +24,7 @@ const {
   COLLECT_WINDOW_MS,
 } = require("../lib/order-ingestion");
 const { checkStock, saveOrder } = require("../lib/order-ingestion/createOrder");
-const { splitDisposablesOrder } = require("../lib/order-ingestion/disposablesSplit");
+const { splitDisposablesOrder, splitLabelOf } = require("../lib/order-ingestion/disposablesSplit");
 const { findCustomerByEmail } = require("../lib/order-ingestion/resolvers");
 const { pollOnce, isMailConfigured, getActiveChannel } = require("../lib/mail-reader");
 const { getIngestionErrorStatusId } = require("../utils/ingestionStatus");
@@ -647,9 +647,10 @@ const approveErrorOrder = async (req, res) => {
       }
     }
 
-    const splitNote = orders[1]
-      ? ` האחזקה פוצלה להזמנה ${orders[1].invoice}.`
-      : "";
+    const splitNote = orders
+      .slice(1)
+      .map((part) => ` הזמנה נפרדת ל${splitLabelOf(part)}: ${part.invoice}.`)
+      .join("");
 
     // הוצאת ההודעה מרשימת הטיפול
     if (claimed.incomingOrder) {

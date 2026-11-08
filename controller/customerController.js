@@ -1642,6 +1642,10 @@ const updateCustomer = async (req, res) => {
           customer.set("billing.separateFruitInvoice", !!req.body.billing.separateFruitInvoice);
         }
 
+        if (req.body.billing?.separateMilk !== undefined) {
+          customer.set("billing.separateMilk", !!req.body.billing.separateMilk);
+        }
+
         if (req.body.billing?.separateDisposablesNote !== undefined) {
           customer.set(
             "billing.separateDisposablesNote",

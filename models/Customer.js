@@ -125,6 +125,12 @@ const CustomerBillingSchema = new mongoose.Schema(
     // ראה lib/order-ingestion/disposablesSplit.js
     separateDisposablesNote: { type: Boolean, default: false },
 
+    // חלב בנפרד (בקשה 08/11/2026 — עתידים ונטלי): הזמנה נקלטת שיש בה חלב
+    // ועוד מוצרים מתפצלת להזמנת חלב (ולכן לתעודה נפרדת), והחשבונית החודשית
+    // מוציא את תעודות החלב לחשבונית משלהן. "חלב" = המוצרים בקטגוריה "חלב"
+    // בלבד; גבינות ושאר מוצרי החלב נשארים עם הכיבוד.
+    separateMilk: { type: Boolean, default: false },
+
     // אחוז הנחה קבוע שסוכם עם הלקוח, ויורד מכל מסמך שמופק לו — תעודת
     // משלוח, הצעת מחיר והחשבונית החודשית.
     //
