@@ -13,6 +13,7 @@ const {
   approveErrorOrder,
   retryFromOrder,
   approveSenderAndReprocess,
+  assignCustomerAndReprocess,
   getItemCandidates,
   resolveItemAlias,
   getWhitelistStats,
@@ -79,6 +80,9 @@ router.post("/whitelist/refresh", isAdmin, refreshWhitelist);
 
 // "השולח הזה לקוח חדש שלנו" — יוצר לקוח וקורא את ההודעה מחדש
 router.post("/:id/approve-sender", isAdmin, approveSenderAndReprocess);
+
+// "זו הזמנה של לקוח קיים" — לרוב הזמנה שהמשרד העביר מפלאפון פרטי
+router.post("/:id/assign-customer", isAdmin, assignCustomerAndReprocess);
 
 // ── פעולות מתוך מסך ההזמנה, על הזמנה שנכנסה ב"שגיאה בקריאה" ──
 

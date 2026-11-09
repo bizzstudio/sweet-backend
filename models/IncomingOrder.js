@@ -224,6 +224,18 @@ const incomingOrderSchema = new mongoose.Schema(
     // הפריטים שזוהו + ההתאמה שלהם לקטלוג
     matchedItems: { type: [matchedItemSchema], required: false, default: [] },
 
+    // ── לקוח שאדם בחר ("שייך ללקוח") ──
+    //
+    // מחוץ ל-resolved בכוונה: הרצה חוזרת מאפסת את resolved, ובחירה של אדם
+    // צריכה לשרוד אותה. כשהשדה מלא הוא גובר על כל זיהוי אוטומטי.
+    assignedCustomer: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Customer",
+      required: false,
+    },
+    assignedBy: { type: String, required: false },
+    assignedAt: { type: Date, required: false },
+
     // מה נפתר בפועל: לקוח, כתובת, סוג משלוח
     resolved: {
       customer: {

@@ -1106,6 +1106,75 @@ const approveSenderAndReprocess = async (req, res) => {
 };
 
 /**
+ * POST /api/incoming-orders/:id/assign-customer   { customerId }
+ *
+ * "ההודעה הזו של הלקוח הזה" — לקוח קיים, שנבחר מרשימה. ההודעה נקראת מחדש
+ * כאילו הלקוח שלח אותה: המחירון שלו, ההיסטוריה שלו, ובסוף תעודה כרגיל.
+ *
+ * המקרה העיקרי: הזמנה שלקוח שלח לפלאפון פרטי והועברה משם למערכת. השולח הוא
+ * המשרד, ולכן "לקוח חדש" היה פותח כרטיס על המספר של המשרד. כאן הכתובת או
+ * המספר של השולח *לא* נוספים לכרטיס — המשרד לא הופך ללקוח.
+ */
+const ASSIGNABLE_STATUSES = new Set(["unknown_sender", "failed", "not_an_order"]);
+
+const assignCustomerAndReprocess = async (req, res) => {
+  try {
+    const customerId = String(req.body?.customerId || "");
+    if (!mongoose.Types.ObjectId.isValid(customerId)) {
+      return res.status(400).send({ message: "יש לבחור לקוח" });
+    }
+
+    const doc = await IncomingOrder.findById(req.params.id);
+    if (!doc) return res.status(404).send({ message: "ההודעה לא נמצאה" });
+
+    if (!ASSIGNABLE_STATUSES.has(doc.status)) {
+      return res.status(400).send({
+        message:
+          doc.status === "order_created"
+            ? `ההודעה כבר הפכה להזמנה ${doc.invoice}. להחלפת לקוח יש לפתוח את ההזמנה עצמה.`
+            : `אי אפשר לשייך הודעה בסטטוס "${doc.status}"`,
+      });
+    }
+
+    // הודעה של פלטפורמה ממופה במסך הפלטפורמות, לא כאן
+    if (doc.platform?.ref) {
+      return res.status(400).send({
+        message: "זו הודעה מפלטפורמת הזמנות. את הלקוח ממפים במסך הפלטפורמות.",
+      });
+    }
+
+    const customer = await Customer.findById(customerId).select("name");
+    if (!customer) return res.status(404).send({ message: "הלקוח לא נמצא" });
+
+    const by = adminDisplayName(req.user);
+    doc.assignedCustomer = customer._id;
+    doc.assignedBy = by;
+    doc.assignedAt = new Date();
+    doc.logs.push({
+      at: new Date(),
+      step: "manual",
+      message: `שויכה ללקוח ${customer.name} (${customer._id}) ע"י ${by}`,
+    });
+    doc.status = "received";
+    await doc.save();
+
+    const processed = await reprocess(doc._id);
+
+    res.send({
+      message: `שויכה ל${customer.name}. ${
+        processed.status === "order_created"
+          ? `נוצרה הזמנה ${processed.invoice}`
+          : `העיבוד הסתיים בסטטוס "${processed.status}"`
+      }`,
+      incomingOrder: processed,
+    });
+  } catch (err) {
+    console.log("assignCustomerAndReprocess error: ", err);
+    res.status(400).send({ message: err.message });
+  }
+};
+
+/**
  * GET /api/incoming-orders/whitelist/stats
  * מצב הרשימה הלבנה — כמה לקוחות מאושרים ומתי נטענה.
  */
@@ -1318,6 +1387,7 @@ module.exports = {
   approveErrorOrder,
   retryFromOrder,
   approveSenderAndReprocess,
+  assignCustomerAndReprocess,
   getItemCandidates,
   resolveItemAlias,
   getWhitelistStats,
