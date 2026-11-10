@@ -541,6 +541,14 @@ orderSchema.post("updateMany", syncFromQuery);
 // מיון חוסם שגדל עם כל הזמנה שנקלטת.
 orderSchema.index({ createdAt: -1 });
 
+// "קניות אחרונות" (customerHistoryController.getRecentPurchases) שולף את
+// הזמנות הארכיון של לקוח לפי תאריך המסמך. אין אינדקס על user, ובלעדיו כל
+// פתיחה של החלון סורקת את כל ההזמנות. חלקי — רק הזמנות ארכיון נכנסות אליו
+orderSchema.index(
+  { user: 1, "archive.docDate": -1 },
+  { partialFilterExpression: { source: "archive" } }
+);
+
 const Order = mongoose.model("Order", orderSchema);
 
 // בניית האינדקסים נעשית ברקע בעליית השרת, וכשלון בה אינו מפיל את התהליך —

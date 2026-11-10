@@ -24,6 +24,7 @@ const mongoose = require("mongoose");
 const CustomerPurchaseHistory = require("../models/CustomerPurchaseHistory");
 const Customer = require("../models/Customer");
 const Order = require("../models/Order");
+const DeliveryNote = require("../models/DeliveryNote");
 const { fetchCatalogBySku, lookupCatalog } = require("../utils/catalogBySku");
 const { normalizeSku } = require("../utils/customerPriceList");
 const {
@@ -43,6 +44,11 @@ const {
   previewArchiveOrders,
   importArchiveOrders,
 } = require("../lib/archive-orders/buildArchiveOrders");
+const {
+  normalizeMonths,
+  periodStart,
+  buildRecentPurchases,
+} = require("../utils/recentPurchases");
 
 // ── תקרה לשורות בבקשה אחת ──
 //
@@ -880,9 +886,86 @@ const deleteCustomerHistory = async (req, res) => {
   }
 };
 
+/* ------------------------------------------------------------------ *
+ * קניות אחרונות: כל מוצר שהלקוח קנה בתקופה, עם כל קנייה בתאריך שלה.
+ * מקורות: תעודות משלוח במערכת והזמנות ארכיון (ראה utils/recentPurchases).
+ * ------------------------------------------------------------------ */
+
+// תקרה למסמכים מכל מקור. לקוח כבד מקבל תעודה ביום — כ-365 בשנה. התקרה
+// שומרת על הבקשה גם מול לקוח חריג, והתשובה אומרת במפורש שנחתכה
+const MAX_RECENT_DOCS = 1500;
+
+const getRecentPurchases = async (req, res) => {
+  try {
+    const customerId = String(req.params.customerId || "");
+    if (!mongoose.Types.ObjectId.isValid(customerId)) {
+      return res.status(400).send({ message: "מזהה לקוח לא תקין" });
+    }
+
+    const months = normalizeMonths(req.query?.months);
+    const since = periodStart(months);
+    const customer = new mongoose.Types.ObjectId(customerId);
+
+    const [notes, archives] = await Promise.all([
+      DeliveryNote.find({
+        customer,
+        issuedAt: { $gte: since },
+        "billing.status": { $ne: "cancelled" },
+      })
+        .select("number issuedAt items.productId items.sku items.name items.quantity items.unitPrice")
+        .sort({ issuedAt: -1 })
+        .limit(MAX_RECENT_DOCS + 1)
+        .lean(),
+      Order.find({
+        user: customer,
+        source: "archive",
+        "archive.docDate": { $gte: since },
+      })
+        .select(
+          "archive.docNumber archive.docType archive.docDate archive.unmatchedItems " +
+            "cart._id cart.sku cart.title cart.quantity cart.price"
+        )
+        .sort({ "archive.docDate": -1 })
+        .limit(MAX_RECENT_DOCS + 1)
+        .lean(),
+    ]);
+
+    const truncated = notes.length > MAX_RECENT_DOCS || archives.length > MAX_RECENT_DOCS;
+    const usedNotes = notes.slice(0, MAX_RECENT_DOCS);
+    const usedArchives = archives.slice(0, MAX_RECENT_DOCS);
+
+    const skus = [];
+    for (const note of usedNotes) for (const item of note.items || []) skus.push(item.sku);
+    for (const order of usedArchives) {
+      for (const item of order.cart || []) skus.push(item.sku);
+      for (const item of order.archive?.unmatchedItems || []) skus.push(item.sku);
+    }
+    const catalog = await fetchCatalogBySku(skus.filter(Boolean), "_id sku title");
+
+    const products = buildRecentPurchases({
+      notes: usedNotes,
+      archives: usedArchives,
+      lookup: (sku) => lookupCatalog(catalog, sku),
+    });
+
+    res.send({
+      months,
+      since,
+      notesCount: usedNotes.length,
+      archiveCount: usedArchives.length,
+      truncated,
+      products,
+    });
+  } catch (err) {
+    console.log("getRecentPurchases error: ", err);
+    res.status(500).send({ message: err.message });
+  }
+};
+
 module.exports = {
   getHistorySummary,
   getCustomerHistory,
+  getRecentPurchases,
   checkImportCustomerHistory,
   importCustomerHistory,
   deleteCustomerHistory,

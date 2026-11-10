@@ -17,6 +17,7 @@ const router = express.Router();
 const {
   getHistorySummary,
   getCustomerHistory,
+  getRecentPurchases,
   checkImportCustomerHistory,
   importCustomerHistory,
   deleteCustomerHistory,
@@ -44,6 +45,9 @@ router.get("/", isAdmin, getHistorySummary);
 
 // בדיקה מקדימה לפני יבוא — חייב להירשם לפני "/:customerId"
 router.post("/:customerId/check", isAdmin, isHistoryManager, checkImportCustomerHistory);
+
+// קניות אחרונות לפי תאריך (?months=1|3|6|12) — תעודות במערכת והזמנות ארכיון
+router.get("/:customerId/recent", isAdmin, getRecentPurchases);
 
 // ההיסטוריה של לקוח מסוים
 router.get("/:customerId", isAdmin, getCustomerHistory);
