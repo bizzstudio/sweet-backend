@@ -1,6 +1,14 @@
 // models/Customer.js
 const mongoose = require("mongoose");
 
+// תווים בלתי נראים שמגיעים בהעתק-הדבק מתוכנות בעברית (סימני כיוון RLM/LRM,
+// רווח ברוחב אפס, BOM, רווח קשיח). trim() של JS לא מסיר אותם, והם לא נראים
+// במסך — אבל כתובת שמורה עם RLM בסוף לא שווה לכתובת ששלחה את המייל, וכל
+// ההזמנות מהלקוח נדחות כ"שולח לא מוכר" (רובינשטיין, 11/2026).
+const INVISIBLE_CHARS = /[\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF\u00A0]/g;
+const cleanEmail = (value) =>
+  typeof value === "string" ? value.replace(INVISIBLE_CHARS, "").trim() : value;
+
 const CitySchema = new mongoose.Schema({
   _id: {
     type: Number,
@@ -91,7 +99,7 @@ const CustomerBillingSchema = new mongoose.Schema(
     // ייחודי במסד. הנהלת חשבונות אחת שמשרתת כמה לקוחות (סניפים, חברות
     // באותה קבוצה) לא יכולה להופיע בו פעמיים — ניסיון כזה נדחה ב-409.
     // כאן אין ייחודיות, ולכן אותה כתובת יכולה לשמש כמה לקוחות.
-    invoiceEmail: { type: String, required: false },
+    invoiceEmail: { type: String, required: false, set: cleanEmail },
 
     // מספר הזמנת הרכש שהלקוח דורש לראות על החשבונית (בקשה 28/10/2026, F5).
     // מודפס בראש ההערות (hwc) של כל חשבונית ללקוח. כשהמספר מתחלף — מעדכנים
@@ -231,6 +239,7 @@ const customerSchema = new mongoose.Schema(
       required: true,
       unique: true,
       lowercase: true,
+      set: cleanEmail,
     },
     // המייל המשני — של איש הקשר אצל הלקוח. המערכת לא שולחת אליו דבר, אבל
     // הזמנות שמגיעות ממנו נקלטות ומשויכות ללקוח כמו מהמייל הראשי. כל מה שיוצא ללקוח (חשבונית, אישור הזמנה, איפוס סיסמה,
@@ -247,10 +256,21 @@ const customerSchema = new mongoose.Schema(
       required: false,
       lowercase: true,
       trim: true,
+      set: cleanEmail,
     },
     phone: {
       type: String,
       required: false,
+    },
+    // טלפונים נוספים שמהם הלקוח שולח הזמנות בווצאפ — כמו contactEmail, אבל
+    // לטלפון. נוצר בשביל סמלת (11/2026): רותם ועומר מזמינים שניהם לאותו
+    // כרטיס, ובשדה phone יש מקום לאחד בלבד; החלפה הייתה עוצרת את השני.
+    // נשמרים קנוניים (05XXXXXXXX). לא unique — אותו טלפון יכול לשרת כמה
+    // סניפים, ואז הזיהוי נעצר לבחירה ידנית ולא מנחש.
+    // כלום לא נשלח אליהם, וההתחברות לחנות ב-SMS נשארת לפי phone בלבד.
+    extraPhones: {
+      type: [String],
+      default: undefined,
     },
     // ה-hash של bcrypt. select:false כדי שלא ייצא בשום תגובה רגילה: בלעדיו
     // ‎GET /api/customer (מסך "לקוחות") היה מוריד לדפדפן את ה-hash של כל
@@ -341,7 +361,9 @@ customerSchema.index({ "erp.customerNumber": 1 });
 // חיפוש לפי טלפון קורה בכניסה ב-SMS, בזיהוי כפילויות בהרשמה וביבוא האקסל
 // (שם נבנית שאילתת $in גדולה). בלי אינדקס כל אחד מהם סורק את כל האוסף.
 customerSchema.index({ phone: 1 });
+customerSchema.index({ extraPhones: 1 }, { sparse: true });
 
 const Customer = mongoose.model("Customer", customerSchema);
+Customer.cleanEmail = cleanEmail;
 
 module.exports = Customer;

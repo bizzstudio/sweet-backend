@@ -1529,6 +1529,7 @@ const updateCustomer = async (req, res) => {
       // בשדות האלה - עדכון פרופיל רגיל מהחנות לא משלם עליה
       const touchesStaffFields =
         req.body.contactEmail !== undefined ||
+        req.body.extraPhones !== undefined ||
         req.body.erp !== undefined ||
         req.body.billing !== undefined ||
         req.body.welcomeGift !== undefined ||
@@ -1607,6 +1608,30 @@ const updateCustomer = async (req, res) => {
 
           // ריק = ניקוי מכוון של השדה ($unset, ולא מחרוזת ריקה)
           customer.contactEmail = contactEmail || undefined;
+        }
+
+        // טלפונים נוספים שמהם הלקוח מזמין בווצאפ (ראה extraPhones במודל).
+        // מתקבלים כמערך או כמחרוזת מופרדת בפסיקים/רווחים, נשמרים קנוניים.
+        // מספר שאינו תקין נדחה עם הודעה, ולא נבלע: אחרת המסך מראה "נשמר"
+        // וההזמנות מהמספר ממשיכות להיעצר.
+        if (req.body.extraPhones !== undefined) {
+          const raw = req.body.extraPhones;
+          const parts = Array.isArray(raw)
+            ? raw.map((x) => String(x ?? ""))
+            : String(raw ?? "").split(/[,;\n]+/);
+          const cleaned = [];
+          for (const part of parts) {
+            if (!part.trim()) continue;
+            const canonical = canonicalPhone(part);
+            if (!canonical) {
+              return res
+                .status(400)
+                .send({ message: `"${part.trim()}" אינו מספר טלפון תקין.` });
+            }
+            if (canonical === canonicalPhone(customer.phone)) continue; // כבר הראשי
+            if (!cleaned.includes(canonical)) cleaned.push(canonical);
+          }
+          customer.extraPhones = cleaned.length ? cleaned : undefined;
         }
 
         // מיזוג ולא השמה: הטופס שולח רק את השדות שהוא מציג. ללקוח שנרשם
@@ -1749,6 +1774,7 @@ const updateCustomer = async (req, res) => {
         lastName: updatedUser.lastName,
         email: updatedUser.email,
         contactEmail: updatedUser.contactEmail,
+        extraPhones: updatedUser.extraPhones,
         address: updatedUser.address,
         phone: updatedUser.phone,
         image: updatedUser.image,

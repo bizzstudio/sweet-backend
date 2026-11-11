@@ -50,7 +50,7 @@ const {
 const { getCustomerPurchaseProfile } = require("../utils/customerPurchaseHistory");
 const { canonicalWords } = require("../utils/orderWording");
 const { extractQualifiers } = require("../lib/order-ingestion/qualifiers");
-const { canonicalPhone } = require("../utils/phone");
+const { canonicalPhone, phoneVariations } = require("../utils/phone");
 
 /**
  * שם אדמין לתצוגה.
@@ -1045,6 +1045,24 @@ const approveSenderAndReprocess = async (req, res) => {
         });
       }
       customer = found.customer;
+    }
+
+    // טלפון שכבר רשום בכרטיס (ראשי או נוסף) — שיוך ולא כרטיס כפול. נדיר,
+    // כי הרשימה הלבנה כבר מאשרת אותו, אבל הודעה שנעצרה לפני שהמספר נרשם
+    // בכרטיס עדיין יושבת ב"שולח לא מוכר".
+    if (!customer && phone) {
+      const byPhone = await Customer.find({
+        $or: [{ phone: { $in: phoneVariations(phone) } }, { extraPhones: phone }],
+      }).limit(5);
+      if (byPhone.length > 1) {
+        return res.status(409).send({
+          message:
+            `הטלפון ${phone} רשום אצל כמה לקוחות ` +
+            `(${byPhone.map((c) => c.name).join(", ")}). ` +
+            `יש לשייך את ההודעה ללקוח הנכון בכפתור "שייך ללקוח".`,
+        });
+      }
+      customer = byPhone[0] || null;
     }
 
     let created = false;
