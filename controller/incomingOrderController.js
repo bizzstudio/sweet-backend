@@ -152,6 +152,7 @@ const readWhatsappAttachments = async (attachments, { allowed }) => {
       size: content ? content.length : Number(att?.size) || estimatedSize,
       content,
       allowed,
+      allowImages: true,
     });
 
     if (text) texts.push(text);
