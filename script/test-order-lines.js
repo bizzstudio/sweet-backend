@@ -423,6 +423,90 @@ check("גיליון: שלושה רווחים בתוך תא אינם גבול ע�
 check("גיליון: כותרת עם תאריך אינה מוצר", Object.keys(sheetQty).some((k) => k.startsWith("שם המוצר")), false);
 check("גיליון: חתימה באנגלית וסימוני הקובץ אינם הערה", weeklySheet.note, null);
 
+section("דף הזמנה של Zestt (ROOMS/פתאל) — תא בכל שורה");
+
+const zesttPage = [
+  "הזמנה חדשה מ ROOMS בני ברק (פתאל וורקספייס שותפות מוגבלת בעמ) מס' 84691-252",
+  "תאריך אספקה", "11/11/2026", "לצפייה בהזמנה",
+  "המסמך הופק במערכת Zester", "picture_as_pdfהורד מסמך", "שם המזמין",
+  "ROOMS בני ברק (פתאל וורקספייס שותפות מוגבלת בעמ)", "יעל", ",", "050-592-9496",
+  "סה\"כ", "213.20 ₪", "244.07 ₪ (כולל מע\"מ)", "סטטוס", "אושר", "סה\"כ 4 מוצרים",
+  "מספר הזמנה (לקוח) - 84691-252", "לכבוד: המתוקיה של בני",
+  "שם המוצר", "מק\"ט", "כמות", "סה\"כ כמות", "מחיר (₪)", "סה\"כ (₪)",
+  "1", "סוכר לבן 1 ק\"ג בשקית (1 יח')", "", "ZNS-10", "2", "2", "  יח'", "4.30", "8.60",
+  "2", "סירופ ויטמינציק (1 ליטר)", "", "ZNS-150", "3", "3", "  ליטר", "13.90", "41.70", "פטור ממע\"מ",
+  "3", "נייר אפייה (1 יח')", "", "1342", "2", "2", "  יח'", "12.20", "24.40",
+  // מארז: "כמות" 2 מארזים, "סה"כ כמות" 12 יחידות — המחיר הוא למארז
+  "4", "מים מינרליים (6 יח')", "", "ZNS-77", "2", "12", "  יח'", "15.00", "30.00",
+].join("\n");
+const zestt = parse(zesttPage);
+check("Zestt: נקרא כטבלה", zestt.method, "table");
+check(
+  "Zestt: ארבעה פריטים עם הכמות שהמחיר חושב לפיה",
+  (zestt.items || []).map((i) => [i.rawName, i.quantity]),
+  [
+    ["סוכר לבן 1 ק\"ג בשקית (1 יח')", 2],
+    ["סירופ ויטמינציק (1 ליטר)", 3],
+    ["נייר אפייה (1 יח')", 2],
+    ["מים מינרליים (6 יח')", 2],
+  ]
+);
+check("Zestt: מק\"ט עובר כרמז", (zestt.items || []).map((i) => i.sourceSku), ["ZNS-10", "ZNS-150", "1342", "ZNS-77"]);
+check("Zestt: יחידת האריזה אינה עוברת למלקט", (zestt.items || []).every((i) => i.unit === null), true);
+check("Zestt: שאר הדף (מחירים, מק\"טים, סטטוס) אינו הערה", zestt.note, null);
+check(
+  "Zestt: תווית \"הערות\" מפורשת נכנסת להערה",
+  parse(zesttPage.replace("לכבוד: המתוקיה של בני", "הערות:\nלהשאיר בקבלה")).note,
+  "להשאיר בקבלה"
+);
+
+// חשבון שלא מסתדר (כמות × מחיר ≠ סה"כ) מבטל את הזיהוי — לא מנחשים כמות
+const zesttBroken = parse(zesttPage.replace("4.30\n8.60", "4.30\n99.99"));
+check("Zestt: חשבון שלא מסתדר עוצר לאדם ולא מנחש", [zesttBroken.isOrder, zesttBroken.certainNotOrder, zesttBroken.method], [false, false, "stacked/failed"]);
+
+// שורה שבורה באמצע: הטבלה הייתה נגמרת בשקט אחרי שורה 2 — הזמנה חלקית.
+// "סה"כ 4 מוצרים" בדף תופס את זה.
+const zesttCut = parse(zesttPage.replace("\n3\nנייר אפייה", "\n3א\nנייר אפייה"));
+check("Zestt: פחות מוצרים ממה שהדף מצהיר — עוצר", [zesttCut.isOrder, zesttCut.method], [false, "stacked/failed"]);
+
+// כותרת שנראית כמו טבלה אבל בלי שורה "1" אחריה — לא טבלה מפורקת, ממשיכים כרגיל
+const notStacked = parse(["מוצר", "כמות", "מחיר", "חלב 3", "לחם 2"]);
+check("שורות כותרת בלי שורה 1 — נקרא כרגיל", notStacked.method !== "stacked/failed" && notStacked.items.length >= 2, true);
+
+section("זיהוי הלקוח במייל פלטפורמה — רק מהמייל");
+
+const { findMappedCustomer, extractPlatformRefs, PAGE_TEXT_MARKER } = require("../lib/order-ingestion/platforms");
+const { unwrapTrackingRedirect } = require("../lib/link-follower/extractLinks");
+const platform = {
+  customerMap: [
+    { customer: "PETAH_TIKVA", keys: ["633", "ROOMS בסר פתח תקווה"] },
+    { customer: "BNEI_BRAK", keys: ["ROOMS בני ברק"] },
+  ],
+};
+const bneiBrakMail =
+  "הזמנה חדשה מ ROOMS בני ברק (פתאל וורקספייס שותפות מוגבלת בעמ) מס' 84691-252\n" +
+  "[https://firebasestorage.googleapis.com/x.png?token=943dacc0-f058-633-89a7]\n";
+const withPage = `${bneiBrakMail}\n\n${PAGE_TEXT_MARKER} (app.zester.co.il) ────\nZNS-633\n6.33\n`;
+check(
+  "מספר מהדף או מטוקן בכתובת אינו משייך לסניף אחר",
+  findMappedCustomer(platform, { subject: "הזמנה מספר: 8311934 עבור: ROOMS בני ברק", text: withPage })?.customer,
+  "BNEI_BRAK"
+);
+check(
+  "המזהה של פתח תקווה במייל עצמו — עדיין מזוהה",
+  findMappedCustomer(platform, { subject: "", text: "ROOMS בסר פתח תקווה (פתאל) (633)\nשלח הזמנה חדשה: 8312069" })?.customer,
+  "PETAH_TIKVA"
+);
+check("מזהים מוצעים למיפוי אינם כוללים מספרים מהדף", extractPlatformRefs({ text: withPage }).refs.includes("633"), false);
+
+const mandrill =
+  "https://mandrillapp.com/track/click/1/app.zester.co.il?p=" +
+  Buffer.from(JSON.stringify({ v: 2, p: JSON.stringify({ url: "https://app.zester.co.il/#/externalOrderApproval/abc" }) })).toString("base64url");
+check("קישור מעקב של Mandrill מפוענח ליעד", unwrapTrackingRedirect(mandrill), "https://app.zester.co.il/#/externalOrderApproval/abc");
+check("קישור מעקב פגום נשאר כמו שהוא", unwrapTrackingRedirect("https://mandrillapp.com/track/click/1/x?p=%%%"), "https://mandrillapp.com/track/click/1/x?p=%%%");
+const evil = "https://mandrillapp.com/track/click/1/x?p=" + Buffer.from(JSON.stringify({ p: JSON.stringify({ url: "javascript:alert(1)" }) })).toString("base64url");
+check("יעד שאינו http נשאר עטוף (ונחסם)", unwrapTrackingRedirect(evil), evil);
+
 // ───────────────────────────────────────────────────────────────
 
 console.log(`\n${"─".repeat(50)}`);
