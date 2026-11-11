@@ -1611,7 +1611,7 @@ const updateCustomer = async (req, res) => {
         }
 
         // טלפונים נוספים שמהם הלקוח מזמין בווצאפ (ראה extraPhones במודל).
-        // מתקבלים כמערך או כמחרוזת מופרדת בפסיקים/רווחים, נשמרים קנוניים.
+        // מתקבלים כמערך או כמחרוזת מופרדת בפסיק / נקודה-פסיק / שורה, נשמרים קנוניים.
         // מספר שאינו תקין נדחה עם הודעה, ולא נבלע: אחרת המסך מראה "נשמר"
         // וההזמנות מהמספר ממשיכות להיעצר.
         if (req.body.extraPhones !== undefined) {
@@ -1622,11 +1622,15 @@ const updateCustomer = async (req, res) => {
           const cleaned = [];
           for (const part of parts) {
             if (!part.trim()) continue;
-            const canonical = canonicalPhone(part);
+            // canonicalPhone לוקח את 9 הספרות האחרונות, ולכן שני מספרים שהופרדו
+            // ברווח בלבד ("0528612250 0549770330") היו נשמרים בשקט כמספר השני.
+            // מספר ישראלי, גם עם 972+, הוא לכל היותר 12 ספרות.
+            const digitCount = part.replace(/\D/g, "").length;
+            const canonical = digitCount <= 12 ? canonicalPhone(part) : null;
             if (!canonical) {
               return res
                 .status(400)
-                .send({ message: `"${part.trim()}" אינו מספר טלפון תקין.` });
+                .send({ message: `"${part.trim()}" אינו מספר טלפון תקין. כמה מספרים מפרידים בפסיק.` });
             }
             if (canonical === canonicalPhone(customer.phone)) continue; // כבר הראשי
             if (!cleaned.includes(canonical)) cleaned.push(canonical);
