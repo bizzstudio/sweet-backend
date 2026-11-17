@@ -15,6 +15,8 @@ router.get("/icount/status", isAdmin, billingController.icountStatus);
 router.get("/icount/mode", isAdmin, billingController.icountMode);
 router.post("/icount/sync-customer/:customerId", isAdmin, billingController.syncCustomerToIcount);
 router.get("/icount/document/:doctype/:docnum", isAdmin, billingController.getIcountDocument);
+// חשבונות הבנק של העסק — לבחירת החשבון שאליו נכנסה העברה בנקאית בקבלה
+router.get("/icount/bank-accounts", isAdmin, billingController.getIcountBankAccounts);
 
 // --- מסך דמו ---
 // זמין רק כש-ICOUNT_MODE=demo; אחרת כל אחד מהם מחזיר 409 (הבדיקה בשכבת

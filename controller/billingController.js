@@ -29,6 +29,7 @@ const { calculateVat } = require("../lib/billing/vat");
 const {
   createReceipt,
   getDocument,
+  getBankAccounts,
   DOC_TYPES,
   autoEmailEnabled,
 } = require("../lib/icount/documents");
@@ -2042,6 +2043,25 @@ const getInvoiceTotal = async (req, res) => {
   }
 };
 
+/**
+ * חשבונות הבנק של העסק ב-iCount, לשדה "לחשבון" בהעברה בנקאית.
+ * נשמר בזיכרון לעשר דקות: החשבונות כמעט לא משתנים, וחלון התשלום נפתח
+ * עשרות פעמים ביום. רשימה ריקה נשמרת גם היא — אין בה סוד, רק אין חשבונות.
+ */
+let bankAccountsCache = null;
+const getIcountBankAccounts = async (req, res) => {
+  try {
+    const key = isDemoMode() ? "demo" : "live";
+    if (!bankAccountsCache || bankAccountsCache.key !== key || bankAccountsCache.until < Date.now()) {
+      bankAccountsCache = { key, until: Date.now() + 10 * 60 * 1000, accounts: await getBankAccounts() };
+    }
+    res.send({ accounts: bankAccountsCache.accounts });
+  } catch (err) {
+    // בלי הרשימה עדיין אפשר להפיק קבלה — רק בלי החשבון שאליו נכנס הכסף
+    res.status(502).send({ message: err.message });
+  }
+};
+
 /** מסמך מ-iCount לפי סוג ומספר — לתצוגה באדמין. */
 const getIcountDocument = async (req, res) => {
   try {
@@ -2225,6 +2245,7 @@ module.exports = {
   creditInvoice,
   reissueInvoiceDoc,
   createReceiptForPayment,
+  getIcountBankAccounts,
   getCustomerBalance,
   adjustCustomerBalance,
   getReceipts,
