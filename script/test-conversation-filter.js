@@ -87,7 +87,23 @@ const withList = ["היי", "מגבות נייר\nסבון כלים\nנייר ט
 check("רשימה בתוך הודעה אחת בצבירה", { text: withList.join("\n"), segments: withList }, "human");
 
 section("ראיה להזמנה עולה לטיפול אנושי");
-check("כמות באמצע שורה", { text: "צריך 3 ארגזי תמרים" }, "human");
+check("כמות באמצע שורה", { text: "אולי גם 3 ארגזי תמרים" }, "human");
+
+// ── פתיח מנומס לפני כמות (22/11/26, לקוח "מפעיל") ──
+// עד התיקון "אשמח לקבל למחר 30 חלב 3%" ירדה להערה וההזמנה נוצרה בלי החלב.
+section("פתיח מנומס או ברכה לפני כמות — נקרא כפריט");
+check("צריך + כמות", { text: "צריך 3 ארגזי תמרים" }, "order");
+check("אשמח לקבל למחר + כמות", { text: "אשמח לקבל למחר 30 חלב 3%", channel: "whatsapp" }, "order");
+check("ברכה + פסיק + כמות", { text: "שלום, 2 חלב\n3 לחם", channel: "whatsapp" }, "order");
+{
+  const [item] = parseOrderText({ text: "אשמח לקבל למחר 30 חלב 3%", channel: "whatsapp" }).items;
+  const ok = item && item.rawName === "חלב 3%" && item.quantity === 30 && item.note === "אשמח לקבל למחר";
+  if (ok) passed += 1;
+  else failures.push(`פתיח עם מועד — התקבל ${JSON.stringify(item)}`);
+  console.log(`  ${ok ? "✓" : "✗"} פתיח: 30 × "חלב 3%", והמועד נשמר בהערת הפריט`);
+}
+check("פתיח בלי כמות אחריו לא משתנה", { text: "אשמח לקבל חשבונית" }, "quiet");
+check("ברכה לבדה נשארת ברכה", { text: "שלום, מה שלומך" }, "quiet");
 check("4 שורות בהודעה אחת", { text: "מגבות נייר\nסבון כלים\nנייר טואלט\nשקיות" }, "human");
 check("הודעה ארוכה מ-250 תווים", { text: "א".repeat(260) }, "human");
 
