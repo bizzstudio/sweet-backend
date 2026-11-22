@@ -507,6 +507,85 @@ check("קישור מעקב פגום נשאר כמו שהוא", unwrapTrackingRed
 const evil = "https://mandrillapp.com/track/click/1/x?p=" + Buffer.from(JSON.stringify({ p: JSON.stringify({ url: "javascript:alert(1)" }) })).toString("base64url");
 check("יעד שאינו http נשאר עטוף (ונחסם)", unwrapTrackingRedirect(evil), evil);
 
+// ── טבלת Outlook של טקדה (16–19/11/26) ──
+//
+// 12 מתוך 26 שורות נשמטו בשקט: תא הכמות היה "1 יח' מכל סוג", "2 שקיות של
+// 250 ג'" או "שישייה". ובמייל האמיתי — כל הגוף בתוך <blockquote> של הזחה,
+// ולכן גרסת ה-HTML נחתכה לכלום והקריאה נפלה ל-plain, שבו כל תא בשורה משלו.
+section("טבלה: תא כמות עם מילים, ושני מוצרים בשורה");
+{
+  const table = parseOrderText({
+    text: [
+      "מוצר\tכמות",
+      "חלב 3%\t4יח'",
+      "קוטג+ גבינה לבנה\t1 יח' מכל סוג",
+      "תמר מגע'ול\t2 שקיות של 250 ג'",
+      "ספרייט זירו – ליטר וחצי\tשישייה",
+      "בננות\t15 יח'",
+      // כמו במייל האמיתי: רוב התאים נקיים, וכך עמודת הכמות מזוהה
+      "יוגורט ביו 3%\t4 יח'",
+      "שוקולד מריר 70%\t2 יח'",
+      "קפה שחור\t1 שקית",
+    ].join("\n"),
+    channel: "email",
+    sender: { email: "x@example.com" },
+  });
+  check(
+    "כל השורות נקראות, עם הכמות שבתחילת התא",
+    table.items.map((i) => [i.rawName, i.quantity]),
+    [
+      ["חלב 3%", 4], ["קוטג+ גבינה לבנה", 1], ["תמר מגע'ול", 2], ["ספרייט זירו – ליטר וחצי", 1],
+      ["בננות", 15], ["יוגורט ביו 3%", 4], ["שוקולד מריר 70%", 2], ["קפה שחור", 1],
+    ]
+  );
+  check(
+    "מה שאחרי המספר עובר למלקט כהערה",
+    table.items.map((i) => i.note),
+    [null, "יח' מכל סוג", "שקיות של 250 ג'", 'הלקוח כתב "שישייה" — לבדוק כמות', null, null, null, null]
+  );
+  check(
+    "'מכל סוג' או אריזה בלי מספר — ההזמנה נעצרת לבדיקה",
+    [table.isOrder, table.confidence],
+    [true, 0.6]
+  );
+
+  const clean = parseOrderText({
+    text: "מוצר\tכמות\nחלב 3%\t4\nבננות\t15 יח'\nקפה שחור\t1 שקית",
+    channel: "email",
+    sender: { email: "x@example.com" },
+  });
+  check("טבלה רגילה — ביטחון מלא כמו קודם", [clean.items.length, clean.confidence], [3, 0.95]);
+
+  const plus = parseOrderText({
+    text: "מוצר\tכמות\nאגס+תפוח ירוק\t3\nבננות\t15\nקפה שחור\t1",
+    channel: "email",
+    sender: { email: "x@example.com" },
+  });
+  check(
+    "שני מוצרים בשורה עם כמות נקייה — גם נעצרת",
+    [plus.items.length, plus.items[0]?.quantity, plus.confidence],
+    [3, 3, 0.6]
+  );
+}
+
+{
+  const { chooseBodyText } = require("../lib/gmail-reader/parseMessage");
+  const row = (a, b) => `<tr><td><p class=MsoNormal>${a}</p></td><td><p class=MsoNormal>${b}</p></td></tr>`;
+  const table = `<table>${row("מוצר", "כמות")}${row("חלב 3%", "4יח'")}${row("בננות", "15 יח'")}</table>`;
+  const plain = "מוצר\nכמות\nחלב 3%\n4יח'\nבננות\n15 יח'";
+  check(
+    "גוף שכולו בתוך blockquote של הזחה נקרא מה-HTML",
+    chooseBodyText(plain, `<html><body><p>&nbsp;</p><blockquote style="border-left:solid #CCCCCC 1.0pt">היי${table}</blockquote></body></html>`)
+      .includes("חלב 3%\t4יח'"),
+    true
+  );
+  check(
+    "תשובה עם טקסט משלה — הטבלה שבציטוט עדיין לא נקראת",
+    chooseBodyText("אישור, תודה", `<html><body><p>אישור, תודה</p><blockquote>${table}</blockquote></body></html>`),
+    "אישור, תודה"
+  );
+}
+
 // ───────────────────────────────────────────────────────────────
 
 console.log(`\n${"─".repeat(50)}`);
