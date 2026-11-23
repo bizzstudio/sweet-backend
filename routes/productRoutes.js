@@ -25,6 +25,12 @@ const {
   getFacebookFeedCSV,
 } = require("../controller/productController");
 const { isAdmin, extractUserDetails } = require("../config/auth");
+const { getDepositSetup, saveDeposits, applyToOpenNotes } = require("../controller/depositController");
+
+// שיוך משקאות למוצר הפיקדון שלהם (לפני כל נתיב /:id)
+router.get("/deposits", isAdmin, getDepositSetup);
+router.put("/deposits", isAdmin, saveDeposits);
+router.post("/deposits/open-notes", isAdmin, applyToOpenNotes);
 
 // add a product
 router.post("/add", isAdmin, addProduct);

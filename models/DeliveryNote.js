@@ -54,6 +54,10 @@ const DeliveryNoteItemSchema = new mongoose.Schema(
     // נשמר כדי לאפשר פיצול החשבונית החודשית לפי קטגוריה
     category: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: false },
     categoryName: { type: String, required: false },
+
+    // שורת פיקדון שחושבה מכמות המשקאות בתעודה (lib/billing/deposits.js).
+    // מחושבת מחדש בכל בנייה של השורות, ואינה נכנסת לבסיס ההנחה.
+    isDeposit: { type: Boolean, required: false },
   },
   { _id: false }
 );

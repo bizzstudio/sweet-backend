@@ -148,6 +148,21 @@ const productSchema = new mongoose.Schema(
       required: false,
     },
 
+    // פיקדון מכלי משקה: איזה מוצר פיקדון מתווסף לתעודה על כל יחידה של
+    // המוצר הזה, וכמה פיקדונות יש ביחידה (1 לבקבוק, 6 לשישייה, 24 לקרטון).
+    // ראה lib/billing/deposits.js
+    deposit: {
+      type: new mongoose.Schema(
+        {
+          product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+          perUnit: { type: Number, default: 1, min: 1 },
+        },
+        { _id: false }
+      ),
+      required: false,
+      default: undefined,
+    },
+
     // נתוני ההנהח"ש מיבוא האקסל. select: false כדי שעלויות ושמות ספקים
     // לא ייצאו בתגובות של החנות - שאילתה שצריכה אותם מבקשת אותם במפורש
     // ב-select("... erp"). שימו לב: select("+erp.x") על תת-שדה לא עובד.
