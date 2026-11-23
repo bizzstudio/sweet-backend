@@ -25,7 +25,7 @@ const {
 } = require("../lib/order-ingestion");
 const { checkStock, saveOrder } = require("../lib/order-ingestion/createOrder");
 const { splitDisposablesOrder, splitLabelOf } = require("../lib/order-ingestion/disposablesSplit");
-const { findCustomerByEmail } = require("../lib/order-ingestion/resolvers");
+const { findCustomerByEmail, findCustomersByPhone } = require("../lib/order-ingestion/resolvers");
 const { pollOnce, isMailConfigured, getActiveChannel } = require("../lib/mail-reader");
 const { getIngestionErrorStatusId } = require("../utils/ingestionStatus");
 const {
@@ -50,7 +50,7 @@ const {
 const { getCustomerPurchaseProfile } = require("../utils/customerPurchaseHistory");
 const { canonicalWords } = require("../utils/orderWording");
 const { extractQualifiers } = require("../lib/order-ingestion/qualifiers");
-const { canonicalPhone, phoneVariations } = require("../utils/phone");
+const { canonicalPhone } = require("../utils/phone");
 
 /**
  * שם אדמין לתצוגה.
@@ -1052,9 +1052,8 @@ const approveSenderAndReprocess = async (req, res) => {
     // כי הרשימה הלבנה כבר מאשרת אותו, אבל הודעה שנעצרה לפני שהמספר נרשם
     // בכרטיס עדיין יושבת ב"שולח לא מוכר".
     if (!customer && phone) {
-      const byPhone = await Customer.find({
-        $or: [{ phone: { $in: phoneVariations(phone) } }, { extraPhones: phone }],
-      }).limit(5);
+      const found = await findCustomersByPhone(phone);
+      const byPhone = found.primary.length ? found.primary : found.extra;
       if (byPhone.length > 1) {
         return res.status(409).send({
           message:
